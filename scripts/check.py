@@ -12,12 +12,12 @@ def main():
     for directory, pattern in [('share/center-desktop', 'test_center.py'),
                                ('share/i3-show-desktop', 'test_desktop.py'),
                                ('services/fan-control', 'test_controller.py'),
-                               ('tests', 'test_install.py')]:
+                               ('tests', 'test_*.py')]:
         subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(ROOT / directory), '-p', pattern, '-v'], check=True)
     for path in ROOT.rglob('*.py'):
         if not any(part in {'.venv', 'venv', '__pycache__', '.git'} for part in path.relative_to(ROOT).parts):
             py_compile.compile(str(path), doraise=True)
-    for name in ('system-desktop', 'prague-weather', 'desktop-screen-timeout', 'i3-keyboard-layout'):
+    for name in ('system-desktop', 'prague-weather', 'desktop-screen-timeout', 'i3-keyboard-layout', 'desktop-language', 'desktop-restart'):
         py_compile.compile(str(ROOT / 'bin' / name), doraise=True)
     for name in ('center-desktop', 'i3-show-desktop'):
         subprocess.run(['sh', '-n', str(ROOT / 'bin' / name)], check=True)

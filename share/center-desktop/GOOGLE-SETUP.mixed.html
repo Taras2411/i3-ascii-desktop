@@ -1,0 +1,20 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>Подключение Google Календаря</title>
+<style>body{background:#0b0e15;color:#c0caf5;font:17px/1.7 monospace;max-width:900px;margin:60px auto;padding:25px}a,h1,h2{color:#73daca}code{color:#e0af68}</style>
+<h1>Google Календарь / центральная панель</h1>
+<p>Панель получает доступ к списку календарей и событиям. Она умеет читать, создавать, редактировать и удалять события в календарях, где у вашего аккаунта есть право записи. Вход выполняется в браузере Google; пароль панель не получает.</p>
+<ol>
+<li>Откройте <a href="https://console.cloud.google.com/">Google Cloud Console</a> и создайте отдельный проект, например <code>Desktop Calendar</code>.</li>
+<li>В библиотеке API включите <a href="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com">Google Calendar API</a>.</li>
+<li>В <a href="https://console.cloud.google.com/auth/overview">Google Auth Platform</a> настройте приложение: название и контактный email. Для личного Google-аккаунта выберите External. На этапе тестирования добавьте свой аккаунт в Test users.</li>
+<li>В Clients создайте OAuth-клиент типа <strong>Desktop app</strong> и скачайте его JSON. Для веб-приложений нужен другой тип клиента, который здесь не подходит.</li>
+<li>На панели нажмите <strong>Подключить Google → Импортировать OAuth JSON и войти</strong>, выберите скачанный файл и разрешите доступ в браузере.</li>
+<li>В настройках календаря выберите отображаемые календари. Основной включается автоматически. События загружаются раз в 5 минут; над подписью «шаг» интервал меняется колёсиком.</li>
+</ol>
+<h2>Постоянное подключение</h2>
+<p>У внешнего приложения со статусом <code>Testing</code> refresh-токен для этих разрешений обычно истекает через 7 дней. Для постоянного личного использования переведите приложение в <code>In production</code>, затем при необходимости подключите его заново. Google может показать экран о непроверенном личном приложении. Корпоративные аккаунты могут требовать разрешения администратора.</p>
+<h2>Данные и отключение</h2>
+<p>OAuth-файл, токен, кеш событий и локальные задачи хранятся в <code>~/.local/share/center-desktop/</code>. Доступ к каталогу разрешён только владельцу. Не публикуйте файлы <code>google-token.json</code>, <code>google-client.json</code> и кеш календаря.</p>
+<p>Отозвать разрешение можно на странице <a href="https://myaccount.google.com/connections">подключений Google-аккаунта</a>. После отзыва панель предложит войти заново.</p>
+<p>Повторяющиеся события изменяются по одному вхождению. Для изменения всей серии используйте кнопку открытия Google Календаря. При неоднозначном ответе сети повтор сохранения не создаст дубликат; прерванную запись можно восстановить в настройках.</p>
+<p>Документация: <a href="https://developers.google.com/workspace/calendar/api/quickstart/python">Calendar API / Python</a>, <a href="https://developers.google.com/identity/protocols/oauth2/native-app">OAuth для настольных приложений</a>.</p>
+</html>

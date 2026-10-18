@@ -1,9 +1,12 @@
 """Google Calendar API; all methods run on one background executor."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from desktop_common.i18n import tr, get_language
 import copy
 from datetime import datetime, timedelta
 import json
 import os
-from pathlib import Path
 import socket
 import uuid
 
@@ -38,15 +41,15 @@ class GoogleCalendar:
         if client_path:
             content = json.loads(Path(client_path).read_text())
             if 'installed' not in content:
-                raise CalendarError('An OAuth Desktop app JSON is required; Web application clients are unsupported')
+                raise CalendarError(tr('An OAuth Desktop app JSON is required; Web application clients are unsupported'))
             write_json(self.client, content)
         if not self.client.exists():
-            raise CalendarError('Import a Desktop app OAuth client JSON first')
+            raise CalendarError(tr('Import a Desktop app OAuth client JSON first'))
         flow = InstalledAppFlow.from_client_secrets_file(str(self.client), SCOPES, autogenerate_code_verifier=True)
         self.credentials = flow.run_local_server(host='127.0.0.1', port=0, open_browser=True,
                                                timeout_seconds=180, access_type='offline', prompt='consent',
-                                               authorization_prompt_message='Waiting for Google sign-in in your browser…',
-                                               success_message='Calendar connected. You can close this tab.')
+                                               authorization_prompt_message=tr('Waiting for Google sign-in in your browser…'),
+                                               success_message=tr('Calendar connected. You can close this tab.'))
         self.save_token()
         self.service = None
         self.api()
@@ -61,11 +64,11 @@ class GoogleCalendar:
         import google_auth_httplib2
         if self.credentials is None:
             if not self.token.exists():
-                raise Reconnect('Google Calendar is not connected yet')
+                raise Reconnect(tr('Google Calendar is not connected yet'))
             try:
                 self.credentials = Credentials.from_authorized_user_file(str(self.token), SCOPES)
             except (ValueError, OSError):
-                raise Reconnect('Reconnect your Google account') from None
+                raise Reconnect(tr('Reconnect your Google account')) from None
         if not self.credentials.valid:
             try:
                 self.credentials.refresh(Request())
@@ -73,7 +76,7 @@ class GoogleCalendar:
             except RefreshError:
                 self.credentials = None
                 self.service = None
-                raise Reconnect('Access revoked or expired. Reconnect your Google account') from None
+                raise Reconnect(tr('Access revoked or expired. Reconnect your Google account')) from None
         if self.service is None:
             http = google_auth_httplib2.AuthorizedHttp(self.credentials, http=httplib2.Http(timeout=15))
             self.service = build('calendar', 'v3', http=http, cache_discovery=False)
@@ -90,12 +93,12 @@ class GoogleCalendar:
             if status == 401:
                 self.credentials = None
                 self.service = None
-                raise Reconnect('Please sign in to Google again') from None
-            messages = {403: 'Permission denied or Calendar API is disabled',
-                        404: 'Event or calendar no longer exists',
-                        412: 'Event changed elsewhere. Refresh the calendar and reopen it',
-                        429: 'Google rate limit reached. Try again later'}
-            raise CalendarError(messages.get(status, f'Google Calendar error ({status})')) from None
+                raise Reconnect(tr('Please sign in to Google again')) from None
+            messages = {403: tr('Permission denied or Calendar API is disabled'),
+                        404: tr('Event or calendar no longer exists'),
+                        412: tr('Event changed elsewhere. Refresh the calendar and reopen it'),
+                        429: tr('Google rate limit reached. Try again later')}
+            raise CalendarError(messages.get(status, f"{tr('Google Calendar error (')}{status})")) from None
 
     def sync(self, year, month, selected):
         service = self.api()
@@ -144,9 +147,9 @@ class GoogleCalendar:
         if operation == 'insert':
             if self.pending:
                 if self.pending['operation_id'] != operation_id:
-                    raise CalendarError('A write is pending. Check it in calendar settings first')
+                    raise CalendarError(tr('A write is pending. Check it in calendar settings first'))
                 if {key: value for key, value in self.pending['body'].items() if key != 'id'} != body:
-                    raise CalendarError('Fields changed after disconnection. Resolve the previous write in settings first')
+                    raise CalendarError(tr('Fields changed after disconnection. Resolve the previous write in settings first'))
                 return self.resolve_pending(service, retry=True)
             identifier = uuid.uuid4().hex
             self.pending = dict(calendar=calendar_id, id=identifier, body=dict(body, id=identifier), operation_id=operation_id)
@@ -164,7 +167,7 @@ class GoogleCalendar:
             except HttpError as error:
                 if error.resp.status in (404, 410):
                     return None
-                raise CalendarError('Could not delete the event. Refresh the calendar and try again') from None
+                raise CalendarError(tr('Could not delete the event. Refresh the calendar and try again')) from None
         return self.execute(request)
 
     def resolve_pending(self, service, retry=False):
@@ -174,9 +177,9 @@ class GoogleCalendar:
             result = service.events().get(calendarId=pending['calendar'], eventId=pending['id']).execute(num_retries=1)
         except HttpError as error:
             if error.resp.status != 404:
-                raise CalendarError('Could not check the previous write. Try again later') from None
+                raise CalendarError(tr('Could not check the previous write. Try again later')) from None
             if not retry:
-                raise CalendarError('A write is pending. Click "Check and finish previous write" in settings') from None
+                raise CalendarError(tr('A write is pending. Click "Check and finish previous write" in settings')) from None
             try:
                 result = service.events().insert(calendarId=pending['calendar'], body=pending['body']).execute(num_retries=0)
             except HttpError as error:
@@ -184,11 +187,11 @@ class GoogleCalendar:
                     result = self.execute(service.events().get(calendarId=pending['calendar'], eventId=pending['id']))
                 elif 400 <= error.resp.status < 500 and error.resp.status not in (408, 429):
                     self.clear_pending()
-                    raise CalendarError('Google rejected the event. Check the calendar and fields') from None
+                    raise CalendarError(tr('Google rejected the event. Check the calendar and fields')) from None
                 else:
-                    raise CalendarError('No response from Google. Retry saving; the event ID prevents duplicates') from None
+                    raise CalendarError(tr('No response from Google. Retry saving; the event ID prevents duplicates')) from None
             except (OSError, socket.timeout):
-                raise CalendarError('Connection lost. Retry saving; the event ID prevents duplicates') from None
+                raise CalendarError(tr('Connection lost. Retry saving; the event ID prevents duplicates')) from None
         self.clear_pending()
         self.save_token()
         return result

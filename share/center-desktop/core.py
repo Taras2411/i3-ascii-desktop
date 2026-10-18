@@ -1,5 +1,9 @@
 """Local state, 3D ASCII geometry and background desktop data sources."""
 from __future__ import annotations
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from desktop_common.i18n import tr, get_language
 import calendar
 from datetime import date, datetime, timedelta
 import hashlib
@@ -8,7 +12,6 @@ import json
 import math
 import os
 import re
-from pathlib import Path
 import subprocess
 import time
 from urllib.parse import unquote, urlparse
@@ -105,11 +108,11 @@ def events_on(events, day):
 
 def event_body(title, start, end, all_day=False, location='', description=''):
     if not title.strip():
-        raise ValueError('An event title is required')
+        raise ValueError(tr('An event title is required'))
     if all_day:
         first, last = date.fromisoformat(start), date.fromisoformat(end)
         if last < first:
-            raise ValueError('End date precedes start date')
+            raise ValueError(tr('End date precedes start date'))
         timing = {'start': {'date': first.isoformat()}, 'end': {'date': (last + timedelta(days=1)).isoformat()}}
     else:
         first, last = datetime.fromisoformat(start), datetime.fromisoformat(end)
@@ -117,10 +120,10 @@ def event_body(title, start, end, all_day=False, location='', description=''):
             local = stamp.replace(tzinfo=TZ)
             # Reject nonexistent local times during the spring DST transition.
             if local.timestamp() != local.astimezone(ZoneInfo('UTC')).astimezone(TZ).timestamp() or local.astimezone(ZoneInfo('UTC')).astimezone(TZ).replace(tzinfo=None) != stamp:
-                raise ValueError('This local time does not exist due to daylight saving time')
+                raise ValueError(tr('This local time does not exist due to daylight saving time'))
         first, last = first.replace(tzinfo=TZ), last.replace(tzinfo=TZ)
         if last.timestamp() <= first.timestamp():
-            raise ValueError('End must be after start')
+            raise ValueError(tr('End must be after start'))
         timing = {'start': {'dateTime': first.isoformat(), 'timeZone': 'Europe/Prague'},
                   'end': {'dateTime': last.isoformat(), 'timeZone': 'Europe/Prague'}}
     return dict(summary=title.strip(), location=location.strip(), description=description, **timing)
@@ -246,7 +249,7 @@ class Music:
                 except (OSError, subprocess.SubprocessError):
                     self.capabilities = {}
             return dict(players=players, player=chosen, status=statuses.get(chosen, 'Paused'), capabilities=self.capabilities,
-                        title=clean(fields[0]) or 'Untitled', artist=clean(fields[1]), album=clean(fields[2]),
+                        title=clean(fields[0]) or tr('Untitled'), artist=clean(fields[1]), album=clean(fields[2]),
                         duration=duration, position=position, stamp=time.monotonic(), track=fields[5], cover_spec=cover_spec, art=self.cover(fields[3], cover_spec))
         except (OSError, subprocess.SubprocessError):
             return dict(players=players, player=chosen, status='Stopped', art=[])

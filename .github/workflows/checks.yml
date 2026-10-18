@@ -19,4 +19,4 @@ jobs:
       - name: Behavior and source checks
         run: python scripts/check.py
       - name: Validate example i3 configuration
-        run: i3 -C -c config/i3.example.conf
+        run: i3 -C -c config/i3.conf

@@ -1,4 +1,8 @@
 """Live clock faces with cached, supersampled DSKY segment rendering."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from desktop_common.i18n import tr, get_language
 import math
 from functools import lru_cache
 import time
@@ -145,7 +149,7 @@ class ClockFace:
             self.previous, self.last, self.changed = self.last, stamp, mono
         progress = max(0,min(1,(mono-self.changed)/.42))
         animating = style == 'flip' and progress < 1 and self.previous != stamp
-        signature = (style, stamp, x, y, scale, round(progress, 3) if animating else 1)
+        signature = (style, stamp, x, y, scale, round(progress, 3) if animating else 1, get_language())
         if signature == self.signature:
             self.canvas.used.update(self.visible_keys)
             return animating
@@ -185,7 +189,7 @@ class ClockFace:
             self.rect(key+'base',x+1,92,53,7,'#352719','#6b4a2b')
             for pin in range(4):
                 self.line(key+f'pin{pin}',[(x+15+pin*8,100),(x+15+pin*8,104)],'#805e36')
-        self.text('n-label',202,106,'H H     M M     S S   ·   [ style ]','#8d663d',8,'n')
+        self.text('n-label',202,106,tr('H H     M M     S S   ·   [ style ]'),'#8d663d',8,'n')
 
     def segments(self,key,digit,x,y,w,h,color,dim=None,clip=None,hinge=None):
         for name,points in segment_shapes(x,y,w,h).items():
@@ -228,7 +232,7 @@ class ClockFace:
             self.line(key+'seam',[(x+2,51),(x+53,51)],'#07090c',2)
             self.rect(key+'hinge-left',x,47,4,9,'#586170')
             self.rect(key+'hinge-right',x+51,47,4,9,'#586170')
-        self.text('f-label',202,106,'H H     M M     S S   ·   [ style ]','#737e9c',8,'n')
+        self.text('f-label',202,106,tr('H H     M M     S S   ·   [ style ]'),'#737e9c',8,'n')
 
     def apollo(self, stamp, previous, progress):
         self.rect('a-panel',0,0,410,103,'#080e09','#394638')
@@ -251,4 +255,4 @@ class ClockFace:
                     photo = ImageTk.PhotoImage(image, master=self.canvas)
                 self.digit_images[image_key] = photo
             self.put(key+'smooth', 'image', (x,20), image=self.digit_images[image_key], anchor='nw')
-        self.text('a-label',202,106,'DSKY  /  H H   M M   S S   ·   [ style ]','#5a9d71',8,'n')
+        self.text('a-label',202,106,tr('DSKY  /  H H   M M   S S   ·   [ style ]'),'#5a9d71',8,'n')

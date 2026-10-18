@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """An ASCII weather desktop for the rightmost i3 output. No pip dependencies."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'share'))
+from desktop_common.i18n import tr, get_language
 import argparse
 import ctypes
 import fcntl
 import json
 import logging
-from pathlib import Path
 import queue
 import subprocess
 import threading
@@ -43,18 +46,18 @@ ART = {
 
 def condition(code, day=True):
     if code == 0:
-        return ('sun', 'Clear', GOLD) if day else ('moon', 'Clear night', BLUE)
+        return ('sun', tr('Clear'), GOLD) if day else ('moon', tr('Clear night'), BLUE)
     if code in (1, 2):
-        return 'part', 'Partly cloudy', GOLD
+        return 'part', tr('Partly cloudy'), GOLD
     if code == 3:
-        return 'cloud', 'Overcast', WHITE
+        return 'cloud', tr('Overcast'), WHITE
     if code in (45, 48):
-        return 'fog', 'Fog', MUTED
+        return 'fog', tr('Fog'), MUTED
     if code in (71, 73, 75, 77, 85, 86):
-        return 'snow', 'Snow', WHITE
+        return 'snow', tr('Snow'), WHITE
     if code in (95, 96, 99):
-        return 'storm', 'Thunderstorm', GOLD
-    return 'rain', 'Rain', BLUE
+        return 'storm', tr('Thunderstorm'), GOLD
+    return 'rain', tr('Rain'), BLUE
 
 
 class StableCanvas(tk.Canvas):
@@ -103,10 +106,10 @@ def clothing_advice(data, now):
     current, hourly = data['current'], data['hourly']
     feels = current['apparent_temperature']
     thresholds = (-10, 0, 8, 15, 20, 25)
-    outfits = ('Down coat, thermal layers, hat, gloves',
-               'Winter coat, hat, gloves', 'Insulated jacket',
-               'Jacket and sweater', 'Light jacket or sweatshirt',
-               'T-shirt, light trousers', 'Light summer clothing')
+    outfits = (tr('Down coat, thermal layers, hat, gloves'),
+               tr('Winter coat, hat, gloves'), tr('Insulated jacket'),
+               tr('Jacket and sweater'), tr('Light jacket or sweatshirt'),
+               tr('T-shirt, light trousers'), tr('Light summer clothing'))
     band = lambda value: sum(value >= limit for limit in thresholds)
     parts = [outfits[band(feels)]]
     now_local = now.replace(tzinfo=None)
@@ -118,18 +121,18 @@ def clothing_advice(data, now):
     snow_codes = (71, 73, 75, 77, 85, 86)
     if current['weather_code'] in snow_codes or any(
             hourly['weather_code'][i] in snow_codes for i in wet):
-        parts.append('waterproof shoes')
+        parts.append(tr('waterproof shoes'))
     elif wet:
-        parts.append('bring an umbrella')
+        parts.append(tr('bring an umbrella'))
     if current['wind_speed_10m'] >= 25:
-        parts.append('wind protection')
+        parts.append(tr('wind protection'))
     apparent = hourly.get('apparent_temperature', [])
     evening = [apparent[i] for i, t in enumerate(times)
                if i < len(apparent) and apparent[i] is not None
                and t.date() == now_local.date() and t > now_local
                and 18 <= t.hour <= 23]
     if evening and feels - min(evening) >= 5 and band(min(evening)) < band(feels):
-        parts.append('sweater for the evening' if feels >= 8 else 'dress warmer this evening')
+        parts.append(tr('sweater for the evening') if feels >= 8 else tr('dress warmer this evening'))
     return ' · '.join(parts)
 
 
@@ -332,7 +335,7 @@ class WeatherDesktop:
         w, h = c.winfo_width(), c.winfo_height()
         now = datetime.now(TZ)
         signature = (w, h, now.strftime('%Y-%m-%d %H:%M:%S'),
-                     self.data.get('_fetched') if self.data else None, self.error, self.step)
+                     self.data.get('_fetched') if self.data else None, self.error, self.step, get_language())
         if signature == getattr(self, '_draw_signature', None):
             return
         c.begin_frame()
@@ -358,26 +361,26 @@ class WeatherDesktop:
         def line(y):
             text(35, y, '+' + '-' * 66 + '+', 20, BORDER)
 
-        text(40, 15, 'P R A G U E', 34, CYAN, bold=True)
+        text(40, 15, tr('P R A G U E'), 34, CYAN, bold=True)
         text(855, 20, now.strftime('%H:%M:%S'), 34, WHITE, 'ne')
-        weekdays = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
+        weekdays = [tr('MON'), tr('TUE'), tr('WED'), tr('THU'), tr('FRI'), tr('SAT'), tr('SUN')]
         text(42, 67, '50.0755 N / 14.4378 E', 14, MUTED)
         text(855, 67, weekdays[now.weekday()] + now.strftime('  %d.%m.%Y'), 14, MUTED, 'ne')
         line(102)
         if not self.data:
-            text(450, 380, 'Loading forecast...' if not self.error else 'Offline. Retrying in a minute.', 20, MUTED, 'center')
+            text(450, 380, tr('Loading forecast...') if not self.error else tr('Offline. Retrying in a minute.'), 20, MUTED, 'center')
             return
         d = self.data
         current = d['current']
         kind, label, color = condition(current['weather_code'], current['is_day'])
-        text(42, 145, '[ NOW ]', 15, CYAN)
+        text(42, 145, tr('[ NOW ]'), 15, CYAN)
         text(48, 194, '\n'.join(ART[kind]), 31, color)
         text(820, 195, f"{current['temperature_2m']:+.0f}°", 94, WHITE, 'ne', True)
         text(820, 310, label, 18, color, 'ne')
-        text(820, 348, f"Feels like {current['apparent_temperature']:+.0f}°C", 16, MUTED, 'ne')
-        text(48, 395, f"WIND  {current['wind_speed_10m']:.0f} km/h", 17, BLUE)
-        text(820, 395, f"HUMIDITY  {current['relative_humidity_2m']}%", 17, CYAN, 'ne')
-        text(48, 433, 'CLOTHING', 13, CYAN)
+        text(820, 348, f"{tr('Feels like ')}{current['apparent_temperature']:+.0f}°C", 16, MUTED, 'ne')
+        text(48, 395, f"{tr('WIND  ')}{current['wind_speed_10m']:.0f}{tr(' km/h')}", 17, BLUE)
+        text(820, 395, f"{tr('HUMIDITY  ')}{current['relative_humidity_2m']}%", 17, CYAN, 'ne')
+        text(48, 433, tr('CLOTHING'), 13, CYAN)
         advice = clothing_advice(d, now)
         size = 14
         while size > 8 and tkfont.Font(family='Noto Sans Mono',
@@ -385,7 +388,7 @@ class WeatherDesktop:
             size -= 1
         text(150, 432, advice, size, WHITE)
         line(455)
-        text(42, 495, '[ TEMPERATURE / NEXT 12 HOURS ]', 15, CYAN)
+        text(42, 495, tr('[ TEMPERATURE / NEXT 12 HOURS ]'), 15, CYAN)
         hourly = d['hourly']
         upcoming = [i for i, t in enumerate(hourly['time'])
                     if t > now.strftime('%Y-%m-%dT%H:%M')][:12]
@@ -418,9 +421,9 @@ class WeatherDesktop:
                      f"{temperatures[col]:.0f}°", 14, GOLD, 's')
                 text(x, 665, hourly['time'][i][11:16], 12, MUTED, 'n')
         else:
-            text(450, 600, 'Hourly forecast expired. Updating...', 15, MUTED, 'center')
+            text(450, 600, tr('Hourly forecast expired. Updating...'), 15, MUTED, 'center')
         line(694)
-        text(42, 730, '[ PRECIPITATION CHANCE / NEXT 12 HOURS ]', 15, CYAN)
+        text(42, 730, tr('[ PRECIPITATION CHANCE / NEXT 12 HOURS ]'), 15, CYAN)
         if upcoming:
             # A fixed percentage scale keeps a small chance of rain visually
             # small, even on days when every hourly probability is near zero.
@@ -444,16 +447,16 @@ class WeatherDesktop:
                     text(x, y - 11, f'{chance:.0f}%', 13, BLUE, 's')
                 text(x, 880, hourly['time'][i][11:16], 12, MUTED, 'n')
         else:
-            text(450, 815, 'Waiting for a fresh forecast...', 15, MUTED, 'center')
+            text(450, 815, tr('Waiting for a fresh forecast...'), 15, MUTED, 'center')
         line(910)
-        text(42, 945, '[ 3-DAY FORECAST ]', 15, CYAN)
+        text(42, 945, tr('[ 3-DAY FORECAST ]'), 15, CYAN)
         daily = d['daily']
         # Match dates instead of assuming the cached first day is still today.
         indices = [i for i, day in enumerate(daily['time']) if day >= now.date().isoformat()][:3]
         for row, i in enumerate(indices):
             y = 985 + row * 43
             date = datetime.fromisoformat(daily['time'][i])
-            day_label = 'Today' if date.date() == now.date() else weekdays[date.weekday()] + date.strftime(' %d.%m')
+            day_label = tr('Today') if date.date() == now.date() else weekdays[date.weekday()] + date.strftime(' %d.%m')
             _, desc, shade = condition(daily['weather_code'][i])
             text(48, y, day_label, 17, WHITE)
             text(240, y, desc, 15, shade)
@@ -462,14 +465,14 @@ class WeatherDesktop:
         line(1110)
         if indices:
             i = indices[0]
-            text(48, 1150, f"SUNRISE {daily['sunrise'][i][11:16]}   SUNSET {daily['sunset'][i][11:16]}", 14, GOLD)
+            text(48, 1150, f"{tr('SUNRISE ')}{daily['sunrise'][i][11:16]}{tr('   SUNSET ')}{daily['sunset'][i][11:16]}", 14, GOLD)
         age = time.time() - d.get('_fetched', 0)
         updated = datetime.fromtimestamp(d.get('_fetched', 0), TZ).strftime('%d.%m %H:%M')
-        status = 'offline · ' if self.error else ''
+        status = tr('offline · ') if self.error else ''
         if age > 1800:
-            status += 'stale data · '
+            status += tr('stale data · ')
         text(48, 1187, f"Open-Meteo · {status}{updated}", 12, MUTED)
-        text(850, 1187, f"step {self.step // 60} min · ↕ wheel", 12, CYAN, 'ne')
+        text(850, 1187, f"{tr('step ')}{self.step // 60}{tr(' min · ↕ wheel')}", 12, CYAN, 'ne')
 
 
 def main():

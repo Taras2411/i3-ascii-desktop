@@ -1,2 +1,5 @@
 #!/bin/sh
-exec python3 "$HOME/.local/share/i3-show-desktop/desktop.py" "$@"
+set -eu
+script=$(readlink -f -- "$0")
+root=$(dirname -- "$(dirname -- "$script")")
+exec python3 "$root/share/i3-show-desktop/desktop.py" "$@"

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--user', required=True, help='Local account permitted to control fans')
+    parser.add_argument('--restart', action='store_true', help='Reload systemd and restart the installed service')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run this optional installer as root')
@@ -37,6 +39,11 @@ def main():
         destination.write_text(text)
         destination.chmod(0o644)
         os.chown(destination, 0, 0)
+    if args.restart:
+        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        subprocess.run(['systemctl', 'restart', 'desktop-fan-control.service'], check=True)
+        print('Installed root-owned service files and restarted desktop-fan-control.service.')
+        return
     print('Installed root-owned service files. The service has not been started.')
     print('Next: systemctl daemon-reload')
     print('On the supported hardware: modprobe nct6775')

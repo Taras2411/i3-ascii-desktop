@@ -34,7 +34,7 @@ class InstallationTests(unittest.TestCase):
             source.write_text('# previous source\n')
             self.install(home)
             self.assertEqual(state.read_text(), '{"tasks": ["keep me"]}')
-            copies = list((home / '.local/share/i3-ascii-desktop/backups').glob('*/share/center-desktop/app.py'))
+            copies = list((home / '.local/share/i3-ascii-desktop/backups').glob('*/.local/share/center-desktop/app.py'))
             self.assertEqual(len(copies), 1)
             self.assertEqual(copies[0].read_text(), '# previous source\n')
             self.assertNotEqual(source.read_text(), '# previous source\n')
@@ -50,6 +50,24 @@ class InstallationTests(unittest.TestCase):
             self.install(home)
             self.assertEqual(other.read_text(), 'keep this')
             self.assertFalse(binary.is_symlink())
+
+    def test_link_mode_uses_checkout_and_preserves_config_and_state_backups(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            config = home / '.config/i3/config'
+            config.parent.mkdir(parents=True)
+            config.write_text('# previous config\n')
+            state = home / '.local/share/center-desktop/state.json'
+            state.parent.mkdir(parents=True)
+            state.write_text('{"tasks": ["keep me"]}')
+            subprocess.run([sys.executable, str(ROOT / 'install.py'), '--home', str(home), '--skip-deps', '--link', '--link-config', '--language', 'mixed'], check=True, capture_output=True)
+            self.assertEqual(config.resolve(), ROOT / 'config/i3.conf')
+            self.assertEqual((home / '.local/bin/system-desktop').resolve(), ROOT / 'bin/system-desktop')
+            self.assertEqual((state.with_name('app.py')).resolve(), ROOT / 'share/center-desktop/app.py')
+            self.assertEqual(state.read_text(), '{"tasks": ["keep me"]}')
+            backups = list((home / '.local/share/i3-ascii-desktop/backups').glob('*/.config/i3/config'))
+            self.assertEqual(backups[0].read_text(), '# previous config\n')
+            self.assertEqual((home / '.config/i3-ascii-desktop/settings.json').read_text().strip(), '{\n  "language": "mixed"\n}')
 
 
 if __name__ == '__main__':

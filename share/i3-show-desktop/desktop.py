@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Toggle empty i3 workspaces on every output without moving application windows."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from desktop_common.i18n import tr, get_language
 import argparse
 import fcntl
 import json
 import os
-from pathlib import Path
 import subprocess
-import sys
 import uuid
 
 
@@ -90,9 +92,9 @@ def next_workspace(workspaces, outputs):
     """First globally unused number in the focused monitor's column."""
     outputs=sorted((o for o in outputs if o['active']),key=lambda o:o['rect']['x'])
     focused=next((w for w in workspaces if w.get('focused')),None)
-    if not focused or not outputs:raise RuntimeError('No active monitor found')
+    if not focused or not outputs:raise RuntimeError(tr('No active monitor found'))
     column=next((index+1 for index,o in enumerate(outputs) if o['name']==focused['output']),None)
-    if column is None:raise RuntimeError('Active monitor is disconnected')
+    if column is None:raise RuntimeError(tr('Active monitor is disconnected'))
     occupied=set()
     for workspace in workspaces:
         number=workspace.get('num',-1)
@@ -108,13 +110,13 @@ def create_workspace(i3):
     name,output=next_workspace(before,i3.query('get_outputs'))
     i3.command([f'workspace --no-auto-back-and-forth {quote(name)}'])
     created=next((w for w in i3.query('get_workspaces') if w['name']==name),None)
-    if not created:raise RuntimeError('Could not create a workspace')
+    if not created:raise RuntimeError(tr('Could not create a workspace'))
     if created['output']!=output:
         # A static output assignment can be stale after a monitor is unplugged.
         # Relocate only the newly created empty workspace, never an application.
         node=next((n for n,_ in walk(i3.query('get_tree')) if n.get('type')=='workspace' and n['id']==created['id']),None)
         if not node or any(n.get('window') for n,_ in walk(node)):
-            raise RuntimeError('An i3 rule assigned the new workspace to another monitor; windows were left in place')
+            raise RuntimeError(tr('An i3 rule assigned the new workspace to another monitor; windows were left in place'))
         i3.command([f'workspace --no-auto-back-and-forth {quote(name)}',
                     f'move workspace to output {quote(output)}',
                     f'workspace --no-auto-back-and-forth {quote(name)}'])
@@ -248,7 +250,7 @@ def main():
             else:toggle.show()
         except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as error:
             print(f'i3-show-desktop: {error}',file=sys.stderr)
-            subprocess.run(['notify-send','i3 workspaces',str(error)],check=False)
+            subprocess.run(['notify-send',tr('i3 workspaces'),str(error)],check=False)
             return 1
     return 0
 

@@ -1,2 +1,10 @@
 #!/bin/sh
-exec "$HOME/.local/share/center-desktop/venv/bin/python" "$HOME/.local/share/center-desktop/app.py" "$@"
+set -eu
+script=$(readlink -f -- "$0")
+root=$(dirname -- "$(dirname -- "$script")")
+if [ -x "$root/.venv/bin/python" ]; then
+    python="$root/.venv/bin/python"
+else
+    python="$root/share/center-desktop/venv/bin/python"
+fi
+exec "$python" "$root/share/center-desktop/app.py" "$@"

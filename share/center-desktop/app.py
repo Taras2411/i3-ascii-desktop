@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Personal ASCII desktop for the central monitor of an i3/X11 session."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from desktop_common.i18n import tr, get_language, set_language
 from concurrent.futures import ThreadPoolExecutor
 import calendar
 from datetime import date, datetime, timedelta
@@ -8,10 +12,8 @@ import json
 import logging
 import math
 import os
-from pathlib import Path
 import queue
 import subprocess
-import sys
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, font as tkfont
@@ -291,8 +293,8 @@ class App:
     def tick(self):
         if self.focus.finish():
             self.save()
-            text = 'Work interval complete. Time for a break.' if self.focus.state['stage'] == 'work' else 'Break complete. Ready to continue.'
-            subprocess.Popen(['notify-send', 'Focus', text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            text = tr('Work interval complete. Time for a break.') if self.focus.state['stage'] == 'work' else tr('Break complete. Ready to continue.')
+            subprocess.Popen(['notify-send', tr('Focus'), text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if time.monotonic() >= self.next_sync and not self.cal_busy and not self.needs_auth:
             self.refresh_calendar()
         self.draw()
@@ -314,10 +316,22 @@ class App:
         scale, ox, oy = self.transform()
         self.clock_face.draw(self.state['clock_style'], now, ox + 25 * scale, oy, scale)
 
+    def language_picker(self):
+        win, body = self.dialog(tr('Language'), 580, 260)
+        self.label(body, tr('Interface language for all three widgets'), CYAN)
+        def choose(language):
+            set_language(language)
+            win.destroy()
+            self.draw()
+        for language, label in [('en', 'English'), ('mixed', tr('Mixed (current style)'))]:
+            selected = ' ✓' if get_language() == language else ''
+            self.dialog_button(body, label + selected, lambda language=language: choose(language))
+        self.label(body, tr('Saved automatically; updates within one second.'), MUTED)
+
     def clock_picker(self):
-        win, body = self.dialog('Clock styles / HH:MM:SS', 860, 670)
-        self.label(body, 'Clock / choose a style', CYAN)
-        self.label(body, 'Every style shows seconds. Your choice survives restarts.', MUTED)
+        win, body = self.dialog(tr('Clock styles / HH:MM:SS'), 860, 670)
+        self.label(body, tr('Clock / choose a style'), CYAN)
+        self.label(body, tr('Every style shows seconds. Your choice survives restarts.'), MUTED)
         previews = []
         for style, (title, description) in STYLES.items():
             card = tk.Frame(body, bg='#000000', padx=10, pady=7)
@@ -326,13 +340,13 @@ class App:
             preview.pack(side='left')
             info = tk.Frame(card, bg='#0b0e15', padx=12)
             info.pack(side='right', fill='both', expand=True)
-            self.label(info, title, CYAN)
-            label = self.label(info, description, MUTED)
+            self.label(info, tr(title), CYAN)
+            label = self.label(info, tr(description), MUTED)
             label.configure(wraplength=300, font=('Noto Sans Mono', 9))
             def select(style=style):
                 self.state['clock_style'] = style
                 self.save();win.destroy();self.draw()
-            self.dialog_button(info, 'Select' + (' ✓' if self.state['clock_style'] == style else ''), select)
+            self.dialog_button(info, tr('Select') + (' ✓' if self.state['clock_style'] == style else ''), select)
             preview.bind('<Button-1>', lambda _, action=select: action())
             preview.configure(cursor='hand2')
             previews.append((preview, ClockFace(preview), style))
@@ -347,9 +361,9 @@ class App:
 
     def draw_arch(self):
         self.text('arch-art', 920, 177, render_arch(self.mesh, orientation=arch_matrix(self.arch.orientation)), 12, '#1793d1', 'n')
-        self.text('arch-hint', 920, 598, 'Drag to rotate · edge to roll · ↕ speed · right-click to pause', 11, MUTED, 'n')
-        mode = {'auto':'rotating', 'drag':'manual', 'inertia':'inertia', 'return':'returning', 'paused':'paused'}[self.arch.mode]
-        self.text('arch-state', 920, 620, f'[ {mode} · {self.arch.target_speed:.2g}× · {40/self.arch.target_speed:g} s/turn ]', 11, '#1793d1', 'n')
+        self.text('arch-hint', 920, 598, tr('Drag to rotate · edge to roll · ↕ speed · right-click to pause'), 11, MUTED, 'n')
+        mode = {'auto':tr('rotating'), 'drag':tr('manual'), 'inertia':tr('inertia'), 'return':tr('returning'), 'paused':tr('paused')}[self.arch.mode]
+        self.text('arch-state', 920, 620, f"[ {mode} · {self.arch.target_speed:.2g}× · {40 / self.arch.target_speed:g}{tr(' s/turn ]')}", 11, '#1793d1', 'n')
 
     def draw(self):
         if not hasattr(self, 'calendar_data') or self.canvas.winfo_width() < 10:
@@ -360,7 +374,8 @@ class App:
         self.draw_clock(now)
         self.region('clock-choose', 20, 0, 440, 116, self.clock_picker)
         self.text('title', 1810, 8, 'L I F E  /  D E S K', 24, WHITE, 'ne')
-        self.text('date', 1810, 53, f"{DAYS[now.weekday()]}  {now:%d.%m.%Y}   ·   WEEK {now.isocalendar().week:02}", 15, MUTED, 'ne')
+        self.text('date', 1810, 53, f"{tr(DAYS[now.weekday()])}  {now:%d.%m.%Y}{tr('   ·   WEEK ')}{now.isocalendar().week:02}", 15, MUTED, 'ne')
+        self.button('language', 1050, 66, '[ EN / MIX ]', self.language_picker, CYAN, 12)
         self.line('top-line', 20, 118, 1800)
         self.draw_calendar(now)
         self.draw_projects()
@@ -379,13 +394,13 @@ class App:
             self.surface.inputs(rectangles)
 
     def draw_calendar(self, now):
-        self.text('cal-title', 25, 145, '[ GOOGLE / CALENDAR ]', 16, CYAN)
-        self.button('cal-settings', 345, 146, '[settings]', self.calendar_settings, MUTED, 12)
+        self.text('cal-title', 25, 145, tr('[ GOOGLE / CALENDAR ]'), 16, CYAN)
+        self.button('cal-settings', 345, 146, tr('[settings]'), self.calendar_settings, MUTED, 12)
         self.button('cal-prev', 25, 180, '[<]', lambda: self.change_month(-1))
-        self.text('cal-month', 245, 180, f'{MONTHS[self.month.month - 1]} {self.month.year}', 15, WHITE, 'n')
+        self.text('cal-month', 245, 180, f'{tr(MONTHS[self.month.month - 1])} {self.month.year}', 15, WHITE, 'n')
         self.button('cal-next', 435, 180, '[>]', lambda: self.change_month(1))
         for column, label in enumerate(DAYS):
-            self.text(f'day-head-{column}', 45 + column * 65, 211, label, 12, MUTED)
+            self.text(f'day-head-{column}', 45 + column * 65, 211, tr(label), 12, MUTED)
         events = self.calendar_data.get('events', [])
         weeks = calendar.Calendar().monthdatescalendar(self.month.year, self.month.month)
         marks_key = (id(events), self.month.year, self.month.month)
@@ -404,32 +419,32 @@ class App:
                 self.region(key, x, y - 2, 40, 23, lambda day=day: self.select_day(day))
         self.line('agenda-line', 25, 393, 455)
         if self.needs_auth:
-            self.button('cal-connect', 25, 410, '[ CONNECT GOOGLE ]', self.connect_google)
-            self.text('cal-explain', 25, 443, 'Sign in to display meetings and events', 12, MUTED)
+            self.button('cal-connect', 25, 410, tr('[ CONNECT GOOGLE ]'), self.connect_google)
+            self.text('cal-explain', 25, 443, tr('Sign in to display meetings and events'), 12, MUTED)
         else:
-            self.text('agenda-date', 25, 407, f'{self.selected_day:%d.%m} / EVENTS', 12, MUTED)
+            self.text('agenda-date', 25, 407, f"{self.selected_day:%d.%m}{tr(' / EVENTS')}", 12, MUTED)
             self.button('event-add', 430, 405, '[+]', self.event_dialog)
             day_events = events_on(events, self.selected_day)
             self.region('agenda-scroll', 23, 434, 465, 57)
             for i, event in enumerate(day_events[self.agenda_offset:self.agenda_offset + 2]):
                 y = 435 + i * 25
-                stamp = 'ALL DAY' if 'date' in event['start'] else event_start(event).strftime('%H:%M')
-                self.text(f'event-{i}', 25, y, stamp + '  ' + clean(event.get('summary', 'Untitled'), 39), 12, event.get('_color', CYAN))
+                stamp = tr('ALL DAY') if 'date' in event['start'] else event_start(event).strftime('%H:%M')
+                self.text(f'event-{i}', 25, y, stamp + '  ' + clean(event.get('summary', tr('Untitled')), 39), 12, event.get('_color', CYAN))
                 self.region(f'event-{i}', 25, y - 2, 458, 23, lambda event=event: self.event_dialog(event))
             if not day_events:
-                self.text('agenda-empty', 25, 438, 'No events on this day', 12, MUTED)
+                self.text('agenda-empty', 25, 438, tr('No events on this day'), 12, MUTED)
         upcoming = sorted((e for e in events if event_end(e) > now and event_start(e) < now + timedelta(days=7)), key=event_start)
         if upcoming and not self.needs_auth:
             event = upcoming[0]
             delay = max(0, int((event_start(event) - now).total_seconds() / 60))
-            when = 'now' if delay == 0 else f'in {delay} min' if delay < 60 else f'in {delay // 60} h' if delay < 1440 else f'in {delay // 1440} d'
-            self.text('next-event', 25, 492, f'NEXT: {clean(event.get("summary"), 29)} · {when}', 11, GOLD)
+            when = tr('now') if delay == 0 else f"{tr('in ')}{delay}{tr(' min')}" if delay < 60 else f"{tr('in ')}{delay // 60}{tr(' h')}" if delay < 1440 else f"{tr('in ')}{delay // 1440}{tr(' d')}"
+            self.text('next-event', 25, 492, f"{tr('NEXT: ')}{clean(event.get('summary'), 29)} · {when}", 11, GOLD)
         elif self.calendar_error and not self.needs_auth:
             self.text('cal-error', 25, 492, clean(self.calendar_error, 60), 11, GOLD)
         fetched = self.calendar_data.get('fetched')
-        status = 'loading…' if self.cal_busy else ('offline · ' if self.calendar_error else '') + (datetime.fromtimestamp(fetched, TZ).strftime('%H:%M') if fetched else 'not connected')
+        status = tr('loading…') if self.cal_busy else (tr('offline · ') if self.calendar_error else '') + (datetime.fromtimestamp(fetched, TZ).strftime('%H:%M') if fetched else tr('not connected'))
         self.text('cal-sync', 25, 516, status, 10, MUTED)
-        self.text('cal-step-text', 480, 516, f"step {self.state['calendar_step'] // 60} min · ↕", 10, CYAN, 'ne')
+        self.text('cal-step-text', 480, 516, f"{tr('step ')}{self.state['calendar_step'] // 60}{tr(' min · ↕')}", 10, CYAN, 'ne')
         self.region('cal-step', 328, 508, 160, 23)
 
     def select_day(self, day):
@@ -475,13 +490,13 @@ class App:
         self.submit('calendar-sync', 'calendar', lambda: self.google.sync(year, month, selected), success, failure)
 
     def draw_projects(self):
-        self.text('projects-head', 25, 551, '[ ACTIVE PROJECTS ]', 13, CYAN)
+        self.text('projects-head', 25, 551, tr('[ ACTIVE PROJECTS ]'), 13, CYAN)
         for i, project in enumerate(self.project_data):
             y = 579 + i * 23
             self.text(f'project-{i}', 25, y, f"{clean(project['name'], 19):19} {clean(project['branch'], 12):12} {'+' + str(project['changes']) if project['changes'] else '✓'}", 11, WHITE)
             self.region(f'project-{i}', 23, y - 2, 465, 23, lambda p=project: subprocess.Popen(['i3-sensible-terminal'], cwd=p['path']))
         if not self.project_data:
-            self.text('projects-empty', 25, 582, 'Scanning project repositories…' if 'projects' in self.pending else 'No Git projects found', 12, MUTED)
+            self.text('projects-empty', 25, 582, tr('Scanning project repositories…') if 'projects' in self.pending else tr('No Git projects found'), 12, MUTED)
 
     def refresh_projects(self):
         def success(data):
@@ -491,7 +506,7 @@ class App:
         self.root.after(30000, self.refresh_projects)
 
     def draw_tasks(self):
-        self.text('tasks-head', 1330, 145, '[ TOP THREE TASKS ]', 16, CYAN)
+        self.text('tasks-head', 1330, 145, tr('[ TOP THREE TASKS ]'), 16, CYAN)
         self.button('task-add', 1770, 145, '[+]', self.task_dialog)
         tasks = sorted(self.state['tasks'], key=lambda t: bool(t.get('done')))
         self.region('tasks-scroll', 1325, 189, 490, 162)
@@ -503,8 +518,8 @@ class App:
             self.region(f'task-{i}', 1328, y - 3, 43, 39, lambda task=task: self.toggle_task(task), task)
             self.region(f'task-edit-{i}', 1375, y - 3, 437, 43, lambda task=task: self.task_dialog(task), task)
         if not tasks:
-            self.text('tasks-empty', 1330, 198, 'What matters today?\nAdd your first task with [+].', 14, MUTED)
-        self.text('tasks-hint', 1330, 374, 'check to complete · click to edit · ↕ scroll', 11, MUTED)
+            self.text('tasks-empty', 1330, 198, tr('What matters today?\nAdd your first task with [+].'), 14, MUTED)
+        self.text('tasks-hint', 1330, 374, tr('check to complete · click to edit · ↕ scroll'), 11, MUTED)
 
     def toggle_task(self, task):
         task['done'] = not task.get('done', False)
@@ -512,39 +527,39 @@ class App:
         self.draw()
 
     def task_dialog(self, task=None):
-        win, body = self.dialog('Task', 560, 240)
-        self.label(body, 'Priority task')
+        win, body = self.dialog(tr('Task'), 560, 240)
+        self.label(body, tr('Priority task'))
         entry = self.entry(body, task['text'] if task else '')
         error = self.label(body, '', GOLD)
         def save():
             value = entry.get().strip()
             if not value:
-                error.configure(text='Enter a task')
+                error.configure(text=tr('Enter a task'))
                 return
             if task:task['text'] = value
             else:self.state['tasks'].append(dict(id=uuid.uuid4().hex, text=value, done=False))
             self.save();win.destroy();self.draw()
         controls = tk.Frame(body, bg='#0b0e15');controls.pack(fill='x', pady=15)
-        self.dialog_button(controls, 'Save', save)
+        self.dialog_button(controls, tr('Save'), save)
         if task:
             def delete():
                 self.state['tasks'].remove(task);self.task_offset=0;self.save();win.destroy();self.draw()
-            self.dialog_button(controls, 'Delete', delete)
+            self.dialog_button(controls, tr('Delete'), delete)
         entry.focus_set()
         entry.bind('<Return>', lambda _: save())
 
     def draw_focus(self):
         self.line('focus-line', 1330, 412, 480)
         stage = self.focus.state['stage']
-        self.text('focus-title', 1330, 435, '[ FOCUS / ' + ('WORK' if stage == 'work' else 'BREAK') + ' ]', 16, CYAN)
+        self.text('focus-title', 1330, 435, tr('[ FOCUS / ') + (tr('WORK') if stage == 'work' else tr('BREAK')) + ' ]', 16, CYAN)
         remaining = math.ceil(self.focus.remaining())
         self.text('focus-time', 1567, 475, f'{remaining // 60:02}:{remaining % 60:02}', 54, GOLD, 'n')
         duration = 1500 if stage == 'work' else 300
         fill = round(34 * max(0, min(1, (duration - remaining) / duration)))
         self.text('focus-progress', 1330, 547, '[' + '#' * fill + '·' * (34 - fill) + ']', 20, PURPLE)
-        self.button('focus-toggle', 1340, 594, '[ PAUSE ]' if self.focus.state['deadline'] else '[ START ]', self.toggle_focus)
-        self.button('focus-reset', 1650, 594, '[ RESET ]', self.reset_focus, MUTED)
-        self.text('focus-hint', 1330, 628, '25 minutes work / 5 minutes break', 11, MUTED)
+        self.button('focus-toggle', 1340, 594, tr('[ PAUSE ]') if self.focus.state['deadline'] else tr('[ START ]'), self.toggle_focus)
+        self.button('focus-reset', 1650, 594, tr('[ RESET ]'), self.reset_focus, MUTED)
+        self.text('focus-hint', 1330, 628, tr('25 minutes work / 5 minutes break'), 11, MUTED)
 
     def toggle_focus(self):
         self.focus.toggle();self.save();self.draw()
@@ -576,9 +591,9 @@ class App:
 
     def draw_music(self):
         data = self.music_data
-        self.text('music-head', 25, 681, '[ NOW PLAYING / MUSIC ]', 16, CYAN)
+        self.text('music-head', 25, 681, tr('[ NOW PLAYING / MUSIC ]'), 16, CYAN)
         player = data.get('player', '')
-        self.button('music-source', 1450, 681, '[ ' + clean(player or 'no source', 30) + ' ↔ ]', self.choose_player, MUTED, 12)
+        self.button('music-source', 1450, 681, '[ ' + clean(player or tr('no source'), 30) + ' ↔ ]', self.choose_player, MUTED, 12)
         art = data.get('art', [])
         spec = self.cover_geometry()
         if art and tuple(data.get('cover_spec', ())) == spec:
@@ -606,9 +621,9 @@ class App:
                            '|                                              |',
                            '+----------------------------------------------+']
             self.text('cover-placeholder', 25, 745, '\n'.join(placeholder), 10, BLUE)
-        title = data.get('title') or 'Nothing playing yet'
+        title = data.get('title') or tr('Nothing playing yet')
         self.text('music-title', 385, 731, clean(title, 110), 29, WHITE, width=1400)
-        self.text('music-artist', 385, 820, clean(data.get('artist') or 'Play music in your browser or player', 100), 20, CYAN)
+        self.text('music-artist', 385, 820, clean(data.get('artist') or tr('Play music in your browser or player'), 100), 20, CYAN)
         self.text('music-album', 385, 851, clean(data.get('album'), 130), 13, MUTED)
         duration, position = data.get('duration', 0), data.get('position', 0)
         if data.get('status') == 'Playing':
@@ -626,15 +641,15 @@ class App:
             return f'{int(value) // 60:02}:{int(value) % 60:02}'
         self.text('music-time', 1810, 932, clock(position) + ' / ' + (clock(duration) if duration else 'LIVE'), 14, MUTED, 'ne')
         controls = [('prev', 385, '[ << ]', 'previous', 'CanGoPrevious'),
-                    ('play', 570, '[ PAUSE ]' if data.get('status') == 'Playing' else '[ PLAY ]', 'play-pause', 'CanPause' if data.get('status') == 'Playing' else 'CanPlay'),
+                    ('play', 570, tr('[ PAUSE ]') if data.get('status') == 'Playing' else tr('[ PLAY ]'), 'play-pause', 'CanPause' if data.get('status') == 'Playing' else 'CanPlay'),
                     ('next', 870, '[ >> ]', 'next', 'CanGoNext')]
         for key, x, label, action, capability in controls:
             if controllable and capabilities.get(capability, True):
                 self.button('music-' + key, x, 948, label, lambda action=action: self.music_control(action), size=20)
             else:
                 self.text('music-' + key, x, 948, label, 20, MUTED)
-        self.text('music-status', 385, 1000, clean(getattr(self, 'music_error', ''), 100) or 'MPRIS  /  color ASCII album art', 10, MUTED)
-        self.text('music-step', 1810, 1000, f"step {self.state['music_step']:g} s · ↕", 10, CYAN, 'ne')
+        self.text('music-status', 385, 1000, clean(getattr(self, 'music_error', ''), 100) or tr('MPRIS  /  color ASCII album art'), 10, MUTED)
+        self.text('music-step', 1810, 1000, f"{tr('step ')}{self.state['music_step']:g}{tr(' s · ↕')}", 10, CYAN, 'ne')
         self.region('music-step', 1650, 990, 170, 26)
 
     def music_control(self, action, value=None):
@@ -647,7 +662,7 @@ class App:
             self.music_error = ''
             self.refresh_music_once()
         def failed(_):
-            self.music_error = 'This source does not support that action'
+            self.music_error = tr('This source does not support that action')
             self.draw()
         self.submit('music-control', 'music', lambda: command(args), done, failed)
 
@@ -657,11 +672,11 @@ class App:
         self.submit('music', 'music', lambda: self.music.snapshot(self.state.get('player'), cover_spec), done)
 
     def choose_player(self):
-        win, body = self.dialog('Music source', 560, 300)
-        self.dialog_button(body, 'Automatic: currently playing source', lambda: self.set_player(None, win))
+        win, body = self.dialog(tr('Music source'), 560, 300)
+        self.dialog_button(body, tr('Automatic: currently playing source'), lambda: self.set_player(None, win))
         for player in self.music_data.get('players', []):
             self.dialog_button(body, clean(player), lambda p=player: self.set_player(p, win))
-        if not self.music_data.get('players'):self.label(body, 'No players found yet', MUTED)
+        if not self.music_data.get('players'):self.label(body, tr('No players found yet'), MUTED)
 
     def set_player(self, player, win):
         self.state['player'] = player;self.save();win.destroy();self.refresh_music_once()
@@ -702,12 +717,12 @@ class App:
         return button
 
     def connect_google(self):
-        win, body = self.dialog('Connect Google Calendar', 730, 420)
-        self.label(body, 'Sign in with Google / OAuth', CYAN)
-        self.label(body, 'A Desktop app client JSON with Calendar API enabled is required.\nOpen the setup guide using the button below.', MUTED)
+        win, body = self.dialog(tr('Connect Google Calendar'), 730, 420)
+        self.label(body, tr('Sign in with Google / OAuth'), CYAN)
+        self.label(body, tr('A Desktop app client JSON with Calendar API enabled is required.\nOpen the setup guide using the button below.'), MUTED)
         status = self.label(body, '', GOLD)
         def start(path=None):
-            status.configure(text='Waiting for browser sign-in… (up to 3 minutes)')
+            status.configure(text=tr('Waiting for browser sign-in… (up to 3 minutes)'))
             button.configure(state='disabled')
             def done(_):
                 self.needs_auth=False;self.calendar_error='';self.state['calendars']=None;self.calendar_data={};self.save();win.destroy();self.refresh_calendar()
@@ -715,19 +730,19 @@ class App:
                 if win.winfo_exists():
                     status.configure(text=clean(error, 260));button.configure(state='normal')
             if not self.submit('calendar-connect', 'calendar', lambda: self.google.connect(path), done, failed):
-                failed(ValueError('Google sign-in is already open in the browser'))
+                failed(ValueError(tr('Google sign-in is already open in the browser')))
         def choose():
             path = filedialog.askopenfilename(parent=win, title='OAuth JSON / Desktop app', filetypes=[('JSON', '*.json')])
             if path:start(path)
-        button = self.dialog_button(body, 'Import OAuth JSON and sign in', choose)
+        button = self.dialog_button(body, tr('Import OAuth JSON and sign in'), choose)
         if self.google.client.exists():
-            self.dialog_button(body, 'Sign in with the saved OAuth client', start)
-        self.dialog_button(body, 'Open setup guide', lambda: subprocess.Popen(['xdg-open', str(DATA / 'GOOGLE-SETUP.html')]))
+            self.dialog_button(body, tr('Sign in with the saved OAuth client'), start)
+        self.dialog_button(body, tr('Open setup guide'), lambda: subprocess.Popen(['xdg-open', str(Path(__file__).with_name('GOOGLE-SETUP.mixed.html' if get_language() == 'mixed' else 'GOOGLE-SETUP.html'))]))
 
     def calendar_settings(self):
-        win, body = self.dialog('Google calendars', 720, 600)
+        win, body = self.dialog(tr('Google calendars'), 720, 600)
         if self.calendar_error:self.label(body, self.calendar_error, GOLD)
-        self.dialog_button(body, 'Connect / switch account', lambda: (win.destroy(), self.connect_google()))
+        self.dialog_button(body, tr('Connect / switch account'), lambda: (win.destroy(), self.connect_google()))
         variables = []
         viewport = tk.Frame(body, bg='#0b0e15')
         viewport.pack(fill='both', expand=True, pady=8)
@@ -745,7 +760,7 @@ class App:
             widget.bind('<Button-4>', scroll);widget.bind('<Button-5>', scroll)
         for cal in self.calendar_data.get('calendars', []):
             variable = tk.BooleanVar(value=cal['id'] in (self.state.get('calendars') or []))
-            label = cal.get('summary', cal['id']) + (' · read-only' if cal.get('accessRole') not in ('owner', 'writer') else '')
+            label = cal.get('summary', cal['id']) + (tr(' · read-only') if cal.get('accessRole') not in ('owner', 'writer') else '')
             check = tk.Checkbutton(choices, text=label, variable=variable, bg='#0b0e15', fg=cal.get('backgroundColor', CYAN),
                                    selectcolor='#151b28', activebackground='#0b0e15', activeforeground=WHITE, font=('Noto Sans Mono', 10), anchor='w')
             check.pack(fill='x');variables.append((cal['id'], variable))
@@ -753,48 +768,48 @@ class App:
         def save():
             self.state['calendars'] = [key for key, variable in variables if variable.get()]
             self.save();win.destroy();self.refresh_calendar()
-        if variables:self.dialog_button(body, 'Save calendar selection', save)
-        self.dialog_button(body, 'Refresh now', lambda: (win.destroy(), self.refresh_calendar()))
+        if variables:self.dialog_button(body, tr('Save calendar selection'), save)
+        self.dialog_button(body, tr('Refresh now'), lambda: (win.destroy(), self.refresh_calendar()))
         if (DATA / 'pending-event.json').exists():
-            status = self.label(body, 'An event creation is pending', GOLD)
+            status = self.label(body, tr('An event creation is pending'), GOLD)
             def recover():
                 def done(_):
-                    if win.winfo_exists():status.configure(text='Write recovered')
+                    if win.winfo_exists():status.configure(text=tr('Write recovered'))
                     self.refresh_calendar()
                 def failed(error):
                     if win.winfo_exists():status.configure(text=clean(error))
                 self.submit('calendar-recover', 'calendar', lambda: self.google.resolve_pending(self.google.api(), retry=True), done, failed)
-            self.dialog_button(body, 'Check and finish previous write', recover)
-        self.label(body, 'Tasks on the right are local and separate from Google Tasks.', MUTED)
+            self.dialog_button(body, tr('Check and finish previous write'), recover)
+        self.label(body, tr('Tasks on the right are local and separate from Google Tasks.'), MUTED)
 
     def event_dialog(self, event=None):
         calendars = self.calendar_data.get('calendars', [])
         writable = [cal for cal in calendars if cal.get('accessRole') in ('owner', 'writer')]
         if not event and not writable:
-            messagebox.showinfo('Calendar', 'No writable calendars. Select an account in settings.', parent=self.root)
+            messagebox.showinfo(tr('Calendar'), tr('No writable calendars. Select an account in settings.'), parent=self.root)
             return
-        win, body = self.dialog('Google Calendar event', 750, 790)
+        win, body = self.dialog(tr('Google Calendar event'), 750, 790)
         can_edit = not event or event.get('_writable', False)
         if event and event.get('recurringEventId'):
-            self.label(body, 'Recurring event: changes apply only to this occurrence.', GOLD)
-        if event and not can_edit:self.label(body, 'This event is read-only.', GOLD)
+            self.label(body, tr('Recurring event: changes apply only to this occurrence.'), GOLD)
+        if event and not can_edit:self.label(body, tr('This event is read-only.'), GOLD)
         choices = writable if not event else [c for c in calendars if c['id'] == event['_calendar']]
-        self.label(body, 'Calendar', MUTED)
+        self.label(body, tr('Calendar'), MUTED)
         calendar_box = ttk.Combobox(body, values=[clean(c.get('summary', c['id'])) for c in choices], state='readonly')
         calendar_box.pack(fill='x', pady=4)
         if choices:calendar_box.current(0)
         if event:calendar_box.configure(state='disabled')
-        self.label(body, 'Title', MUTED)
+        self.label(body, tr('Title'), MUTED)
         title = self.entry(body, event.get('summary', '') if event else '')
         all_day = tk.BooleanVar(value=bool(event and 'date' in event['start']))
-        tk.Checkbutton(body, text='All day · end date inclusive', variable=all_day,
+        tk.Checkbutton(body, text=tr('All day · end date inclusive'), variable=all_day,
                        bg='#0b0e15', fg=WHITE, selectcolor='#151b28', activebackground='#0b0e15').pack(anchor='w')
         default = datetime.combine(self.selected_day, datetime.now(TZ).replace(minute=0, second=0).time(), TZ)
         start = event_start(event) if event else default
         end = event_end(event) if event else default + timedelta(hours=1)
-        self.label(body, 'Start: YYYY-MM-DD HH:MM · Europe/Prague', MUTED)
+        self.label(body, tr('Start: YYYY-MM-DD HH:MM · Europe/Prague'), MUTED)
         first = self.entry(body, start.strftime('%Y-%m-%d') if all_day.get() else start.strftime('%Y-%m-%d %H:%M'))
-        self.label(body, 'End: YYYY-MM-DD HH:MM · Europe/Prague', MUTED)
+        self.label(body, tr('End: YYYY-MM-DD HH:MM · Europe/Prague'), MUTED)
         last = self.entry(body, (end.date() - timedelta(days=1)).isoformat() if all_day.get() else end.strftime('%Y-%m-%d %H:%M'))
         def change_format(*_):
             for entry, stamp in ((first, start), (last, end)):
@@ -802,9 +817,9 @@ class App:
                 entry.delete(0, 'end')
                 entry.insert(0, value[:10] if all_day.get() else value[:10] + ' ' + stamp.strftime('%H:%M'))
         all_day.trace_add('write', change_format)
-        self.label(body, 'Location', MUTED)
+        self.label(body, tr('Location'), MUTED)
         location = self.entry(body, event.get('location', '') if event else '')
-        self.label(body, 'Description', MUTED)
+        self.label(body, tr('Description'), MUTED)
         description = tk.Text(body, height=4, bg='#151b28', fg=WHITE, insertbackground=CYAN, relief='flat', font=('Noto Sans Mono', 10))
         description.pack(fill='x')
         description.insert('1.0', event.get('description', '') if event else '')
@@ -813,7 +828,7 @@ class App:
         controls = tk.Frame(body, bg='#0b0e15');controls.pack(fill='x', pady=5)
         buttons = []
         def perform(operation):
-            if operation == 'delete' and not messagebox.askyesno('Delete event?', 'Delete this event from Google Calendar?' + ('\nOnly the selected occurrence.' if event and event.get('recurringEventId') else ''), parent=win):
+            if operation == 'delete' and not messagebox.askyesno(tr('Delete event?'), tr('Delete this event from Google Calendar?') + (tr('\nOnly the selected occurrence.') if event and event.get('recurringEventId') else ''), parent=win):
                 return
             try:
                 payload = None if operation == 'delete' else event_body(title.get(), first.get(), last.get(), all_day.get(), location.get(), description.get('1.0', 'end-1c'))
@@ -821,7 +836,7 @@ class App:
             except (ValueError, IndexError) as error:
                 status.configure(text=str(error));return
             for button in buttons:button.configure(state='disabled')
-            status.configure(text='Saving…')
+            status.configure(text=tr('Saving…'))
             def done(_):
                 if win.winfo_exists():win.destroy()
                 self.refresh_calendar()
@@ -830,15 +845,15 @@ class App:
                     status.configure(text=clean(error, 220))
                     for button in buttons:button.configure(state='normal')
             if not self.submit('calendar-mutate', 'calendar', lambda: self.google.mutate(operation, calendar_id, payload, event, operation_id), done, failed):
-                failed(ValueError('Wait for the previous write to finish'))
+                failed(ValueError(tr('Wait for the previous write to finish')))
         if can_edit:
-            buttons.append(self.dialog_button(controls, 'Save', lambda: perform('patch' if event else 'insert')))
-            if event:buttons.append(self.dialog_button(controls, 'Delete', lambda: perform('delete')))
+            buttons.append(self.dialog_button(controls, tr('Save'), lambda: perform('patch' if event else 'insert')))
+            if event:buttons.append(self.dialog_button(controls, tr('Delete'), lambda: perform('delete')))
         else:
             for entry in (title, first, last, location):entry.configure(state='disabled')
             description.configure(state='disabled')
         if event:
-            self.dialog_button(controls, 'Open in Google Calendar' + (' / entire series' if event.get('recurringEventId') else ''), lambda: webbrowser.open(event.get('htmlLink', 'https://calendar.google.com/')))
+            self.dialog_button(controls, tr('Open in Google Calendar') + (tr(' / entire series') if event.get('recurringEventId') else ''), lambda: webbrowser.open(event.get('htmlLink', 'https://calendar.google.com/')))
         title.focus_set()
 
 

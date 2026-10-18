@@ -1,6 +1,6 @@
 # i3 ASCII Desktop
 
-Three interactive desktop surfaces for a three-monitor i3/X11 setup. They sit beneath application windows and remain visible on empty workspaces, without occupying tiling containers or taking keyboard focus. The interface, source comments and documentation are in English.
+Three interactive desktop surfaces for a three-monitor i3/X11 setup. They sit beneath application windows and remain visible on empty workspaces, without occupying tiling containers or taking keyboard focus. Choose a fully English interface or the original mixed Russian/English interface. Source comments and documentation are in English; translations are isolated in a locale catalog.
 
 ```text
  LEFT / SYSTEM                 CENTER / PERSONAL                 RIGHT / WEATHER
@@ -38,17 +38,17 @@ sudo pacman -S --needed i3-wm python tk python-pip libx11 libxext \
 
 The central app installs its Python dependencies into its own virtual environment using the included [requirements lock](share/center-desktop/requirements.lock). System/weather use the standard library. Music controls need `playerctl`; capability queries use `gdbus` from GLib. NVIDIA telemetry requires the proprietary driver's NVML library. CPU sensors depend on available Linux hwmon drivers. Missing optional telemetry is displayed as unavailable.
 
-The full example i3 config also references optional desktop utilities: `i3status-rust`, `rofi`, `i3lock`, `xss-lock`, `dex`, `network-manager-applet`, `copyq`, `pasystray`, `pavucontrol`, `libpulse`, `maim`, `xclip`, `xorg-setxkbmap` and a terminal. Install those you use or remove their example lines.
+The full example i3 config also references optional desktop utilities: `i3status-rust`, optional `speedread` and `snixembed`, `rofi`, `i3lock`, `xss-lock`, `dex`, `network-manager-applet`, `copyq`, `pasystray`, `pavucontrol`, `libpulse`, `maim`, `xclip`, `xorg-setxkbmap` and a terminal. Install those you use or remove their example lines.
 
 ## Install
 
 ```sh
 git clone https://github.com/Taras2411/i3-ascii-desktop.git
 cd i3-ascii-desktop
-python3 install.py
+python3 install.py --link
 ```
 
-The installer copies launchers into `~/.local/bin`, app sources into `~/.local/share`, and config examples into `~/.local/share/i3-ascii-desktop/config`. Replaced source/config-example files are backed up under `~/.local/share/i3-ascii-desktop/backups/`. Existing personal app state is preserved. The installer does not modify the active i3 config, start widgets, or install a root service.
+With `--link`, launchers and sources point directly to this checkout: future edits have one Git source. Keep the checkout at a stable path. The Python environment lives in `.venv` inside the checkout. Without `--link`, the installer copies launchers into `~/.local/bin`, app sources into `~/.local/share`, and config examples into `~/.local/share/i3-ascii-desktop/config`. Replaced source/config-example files are backed up under `~/.local/share/i3-ascii-desktop/backups/`. Existing personal app state is preserved. The installer does not modify the active i3 config, start widgets, or install a root service.
 
 Merge [config/i3-widgets.conf](config/i3-widgets.conf) into your i3 config, or add:
 
@@ -56,9 +56,9 @@ Merge [config/i3-widgets.conf](config/i3-widgets.conf) into your i3 config, or a
 include ~/.local/share/i3-ascii-desktop/config/i3-widgets.conf
 ```
 
-This snippet assumes `$mod` is already defined. Remove duplicate startup commands and key bindings. For a complete starting point, see [i3.example.conf](config/i3.example.conf) and [i3status-rust.toml](config/i3status-rust.toml). Replace the example `$left`, `$center`, `$right` output names with those from `xrandr --query`; adapt the workspace output assignments too. The [monitor layout script](config/monitors.example.sh) is an example for one specific arrangement and is not applied automatically.
+This snippet assumes `$mod` is already defined. Remove duplicate startup commands and key bindings. For a complete starting point, see [i3.conf](config/i3.conf) and [i3status-rust.toml](config/i3status-rust.toml). Replace the example `$left`, `$center`, `$right` output names with those from `xrandr --query`; adapt the workspace output assignments too. The [monitor layout script](config/monitors.sh) targets the reference three-monitor arrangement. The full config enables it; adapt it before linking configs on another machine. Installing app links alone does not apply it.
 
-Validate your merged config with `i3 -C -c ~/.config/i3/config`, then reload i3. The widgets refuse duplicate instances. To replace an already running older widget, stop that widget process and launch its command again.
+Validate your merged config with `i3 -C -c ~/.config/i3/config`, then reload i3. The widgets refuse duplicate instances. After changing source, run `~/.local/bin/desktop-restart` to load the new code. Personal state is retained.
 
 Each widget also starts directly:
 
@@ -69,6 +69,34 @@ Each widget also starts directly:
 ```
 
 `python3 install.py --home /tmp/desktop-staging --skip-deps` stages source/config files for inspection without creating a Python environment. A staged central launcher needs its dependencies installed before use.
+
+## Language
+
+Click **[ EN / MIX ]** in the central widget header to select **English** or **Mixed (current style)**. All three widgets update without a restart. The choice is saved under `~/.config/i3-ascii-desktop/settings.json`, outside Git. Calendar events, tasks, track metadata and other user content retain their original language.
+
+```sh
+~/.local/bin/desktop-language en
+~/.local/bin/desktop-language mixed
+~/.local/bin/desktop-language --get
+~/.local/bin/desktop-language  # Open the standalone picker
+```
+
+New installations default to English. Language changes apply to the panels and newly opened dialogs; close and reopen an existing dialog to refresh its labels. `--language mixed` selects the original appearance during installation. `DESKTOP_LANGUAGE=en` or `mixed` temporarily overrides the saved setting for a process. The Google setup guide has both language variants.
+
+## One checkout for code and active configs
+
+On the reference setup, the following command links application source, the active i3 config, the bar config and the monitor script to this checkout, backing up replaced files first:
+
+```sh
+python3 install.py --link --link-config --language mixed
+i3 -C -c ~/.config/i3/config
+i3-msg reload
+~/.local/bin/desktop-restart
+```
+
+Review output names, modes and optional utilities in `config/i3.conf` and `config/monitors.sh` before applying the full reference config on another machine. In link mode, both `~/.local/bin` commands and the legacy app source paths resolve to repository files. Personal JSON, OAuth files, covers, logs and caches remain in their existing private locations. `git pull --ff-only` updates this checkout; restart the widgets to load Python changes. Reload i3 after config changes. Re-run the link installer if a change adds new source files or launchers.
+
+The root fan daemon remains a root-owned deployed copy, since a root service must not execute editable user code via a symlink. Its source of truth is still `services/fan-control/daemon.py` in this repository. After changes to that service, run `sudo python3 scripts/install-fan-service.py --user "$USER" --restart` to deploy and restart it. The deployed Python file should match the repository source byte for byte; the service template substitutes only the authorized user's numeric UID.
 
 ## Controls
 
@@ -132,12 +160,12 @@ python3 -m venv .venv
 .venv/bin/python scripts/check.py
 ```
 
-The checks exercise clocks, 3D motion, cover geometry, focus persistence, calendar dates/write recovery, workspace numbering/restore, fan safety and staged installation. API/hardware interactions in unit tests use fakes. CI also validates the example i3 syntax. Live Google write acceptance requires your own account; no credentials are needed for unit tests.
+The checks exercise clocks, 3D motion, cover geometry, focus persistence, calendar dates/write recovery, workspace numbering/restore, fan safety and staged installation. API/hardware interactions in unit tests use fakes. CI also validates the reference i3 syntax and language/link installation behavior. Live Google write acceptance requires your own account; no credentials are needed for unit tests.
 
 For local telemetry inspection: `python3 bin/system-desktop --sample`. For a headless weather update: `python3 bin/prague-weather --fetch` (this writes your local forecast cache and contacts Open-Meteo).
 
 ## Remove or restore
 
-Remove the added i3 lines, stop the three widget processes, and delete the six installed launchers if no longer needed. Restore earlier source files from the installer backup if replacing an older installation. Keep central personal state unless you intentionally want to erase it. Google access can be revoked in your Google account's connected-app settings.
+Remove the added i3 lines, stop the three widget processes, and delete the installed launchers if no longer needed. Restore earlier source files from the installer backup if replacing an older installation. Keep central personal state unless you intentionally want to erase it. Google access can be revoked in your Google account's connected-app settings.
 
 If installed, stop/disable `desktop-fan-control.service` before removing its service file, `/usr/local/lib/desktop-fan-control.py` and optional modules-load config, then run `systemctl daemon-reload`. Stopping the service restores AUTO; restore an earlier backed-up service if needed.

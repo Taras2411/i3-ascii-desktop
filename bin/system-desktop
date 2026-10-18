@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """ASCII system dashboard with optional privileged fan controls below windows on the leftmost i3 output."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'share'))
+from desktop_common.i18n import tr, get_language
 import argparse
 from collections import deque
 import ctypes
@@ -9,7 +13,6 @@ import json
 import logging
 import math
 import os
-from pathlib import Path
 import re
 import shutil
 import socket
@@ -626,6 +629,10 @@ class SystemDesktop:
         self.root.after(10000, self.place)
 
     def clock_tick(self):
+        language = get_language()
+        if language != getattr(self, '_language', None):
+            self._language = language
+            self.draw()
         item = getattr(self, 'clock_item', None)
         if item:
             value = datetime.now().strftime('%H:%M:%S')
@@ -719,14 +726,14 @@ class SystemDesktop:
                 text(x - 8, y, f'{maximum:g}{unit}' if percent else byte_size(maximum) + '/s', 10, MUTED, 'ne')
                 text(x - 8, y + height / 2, f'{maximum / 2:g}{unit}' if percent else byte_size(maximum / 2) + '/s', 10, MUTED, 'e')
                 text(x - 8, y + height, '0', 10, MUTED, 'ne')
-                text(x, y + height + 16, '-3 min', 11, MUTED)
-                text(x + width / 3, y + height + 16, '-2 min', 11, MUTED, 'n')
-                text(x + width * 2 / 3, y + height + 16, '-1 min', 11, MUTED, 'n')
-                text(x + width, y + height + 16, 'now', 11, MUTED, 'ne')
+                text(x, y + height + 16, tr('-3 min'), 11, MUTED)
+                text(x + width / 3, y + height + 16, tr('-2 min'), 11, MUTED, 'n')
+                text(x + width * 2 / 3, y + height + 16, tr('-1 min'), 11, MUTED, 'n')
+                text(x + width, y + height + 16, tr('now'), 11, MUTED, 'ne')
 
         def thermal_legend(x, cpu=False):
-            text(x, 348, '── load, %', 11, GOLD)
-            text(x + 165, 348, '── temperature' + (' CPU' if cpu else '') + ', °C', 11, PURPLE)
+            text(x, 348, tr('── load, %'), 11, GOLD)
+            text(x + 165, 348, tr('── temperature') + (' CPU' if cpu else '') + ', °C', 11, PURPLE)
 
         def fan_bar(x, label, rpm, percent, pwm=False):
             text(x + 4, 15, label + ' FAN', 15, CYAN)
@@ -735,7 +742,7 @@ class SystemDesktop:
             text(x, 44, '[' + '.' * segments + ']', 18, BORDER)
             if percent is not None:
                 text(x, 44, '[' + '#' * filled, 18, CYAN)
-            status = f'{rpm:.0f} RPM' if rpm is not None else 'no sensor'
+            status = f'{rpm:.0f} RPM' if rpm is not None else tr('no sensor')
             if percent is not None:
                 status += f" · {percent:.0f}%" + (' PWM' if pwm else '')
             text(x + 368, 15, status, 15, WHITE, 'ne')
@@ -746,9 +753,9 @@ class SystemDesktop:
                 text(x + offset, 80, '[' + name + ']', 12,
                      CYAN if active else MUTED, bold=active)
             if self.fan_error:
-                detail = 'OFFLINE'
+                detail = tr('OFFLINE')
             elif state.get('override'):
-                detail = 'COOLING 100%'
+                detail = tr('COOLING 100%')
             elif mode == 'manual':
                 detail = f"MANUAL {state.get('target', 0)}%"
             elif state.get('error'):
@@ -763,12 +770,12 @@ class SystemDesktop:
         divider(107)
         d = self.sampler.data
         if d is None:
-            text(920, 450, 'Collecting first sample...', 22, MUTED, 'center')
+            text(920, 450, tr('Collecting first sample...'), 22, MUTED, 'center')
             return
         fan_bar(486, 'CPU', d['cpu_fan_rpm'], d['cpu_fan_percent'], pwm=True)
         fan_bar(986, 'GPU', d['gpu_fan_rpm'], d['gpu_fan_percent'])
         uptime = int(d['uptime'])
-        text(1810, 70, f"UP {uptime // 86400}d {uptime // 3600 % 24:02}:{uptime // 60 % 60:02}"
+        text(1810, 70, f"UP {uptime // 86400}{tr('d ')}{uptime // 3600 % 24:02}:{uptime // 60 % 60:02}"
              + f"   LOAD {' / '.join(f'{v:.2f}' for v in d['load'])}", 14, MUTED, 'ne')
         history = self.sampler.history
         text(25, 155, '[ CPU ]', 16, CYAN)
@@ -790,7 +797,7 @@ class SystemDesktop:
             chart(70, 210, history['cpu'], 100, GOLD, '#3c3020', width=480,
                   temperature=history['temperature'])
         thermal_legend(70, cpu=self.cpu_threads)
-        text(25, 374, 'CLICK GRAPH: ' + ('total load' if self.cpu_threads else 'per-thread graphs'), 11, MUTED)
+        text(25, 374, tr('CLICK GRAPH: ') + (tr('total load') if self.cpu_threads else tr('per-thread graphs')), 11, MUTED)
         text(25, 395, '[ RAM ]', 17, CYAN)
         text(580, 387, f"{d['memory']:.1f}%", 30, CYAN, 'ne')
         chart(70, 450, history['memory'], 100, CYAN, '#183b34')
@@ -803,9 +810,9 @@ class SystemDesktop:
             text(1190, header - 7, byte_size(d[key]) + '/s', 25, color, 'ne')
             maximum = max(1024, 2 ** math.ceil(math.log2(max(1, max(history[key])) * 1.1)))
             chart(680, graph, history[key], maximum, color, shade, False)
-            interface = d['interface'] or 'disconnected'
-            text(635, graph + 140, f"{interface}   TOTAL {byte_size(d[key + '_total'])}"
-                 + f"   PEAK {byte_size(max(history[key]))}/s", 12, MUTED)
+            interface = d['interface'] or tr('disconnected')
+            text(635, graph + 140, f"{interface}{tr('   TOTAL ')}{byte_size(d[key + '_total'])}"
+                 + f"{tr('   PEAK ')}{byte_size(max(history[key]))}/s", 12, MUTED)
         gpu_load = d['gpu'] is not None
         gpu_key = 'gpu' if gpu_load else 'gpu_temp'
         text(1245, 155, '[ GPU ]', 16, CYAN)
@@ -818,28 +825,28 @@ class SystemDesktop:
               unit='%' if gpu_load else '°C', width=480,
               temperature=history['gpu_temp'] if gpu_load else None)
         thermal_legend(1290)
-        text(1245, 374, d['gpu_name'] + (' · load unavailable' if not gpu_load else ''), 11, MUTED)
+        text(1245, 374, d['gpu_name'] + (tr(' · load unavailable') if not gpu_load else ''), 11, MUTED)
         text(1245, 395, '[ VRAM ]', 16, CYAN)
         text(1800, 387, f"{d['vram']:.1f}%" if d['vram'] is not None else '--', 30, BLUE, 'ne')
         chart(1290, 450, history['vram'], 100, BLUE, '#1c2b44')
         if d['vram'] is None:
-            text(1545, 488, 'Driver does not report VRAM usage', 13, MUTED, 'n')
+            text(1545, 488, tr('Driver does not report VRAM usage'), 13, MUTED, 'n')
         capacity = byte_size(d['vram_total']) if d['vram_total'] else '--'
         used = byte_size(d['vram_used']) if d['vram_used'] is not None else '--'
-        text(1245, 587, f"VRAM {used} / {capacity}   {d['gpu_driver']}", 12, MUTED)
+        text(1245, 587, f"VRAM {used} / {capacity}   {tr(d['gpu_driver'])}", 12, MUTED)
         divider(625)
         processes = d['processes']
-        for x, key, title, color in ((25, 'cpu', 'BY CPU', GOLD), (635, 'rss', 'BY MEMORY', CYAN)):
-            text(x, 665, f'[ PROCESSES / {title} ]', 16, CYAN)
-            text(x, 706, f"{'PID':>6}  {'PROCESS':<22} {'CPU %':>7} {'RAM':>11} ST", 14, MUTED)
+        for x, key, title, color in ((25, 'cpu', tr('BY CPU'), GOLD), (635, 'rss', tr('BY MEMORY'), CYAN)):
+            text(x, 665, f"{tr('[ PROCESSES / ')}{title} ]", 16, CYAN)
+            text(x, 706, f"{'PID':>6}  {tr('PROCESS'):<22} {'CPU %':>7} {'RAM':>11} ST", 14, MUTED)
             for row, process in enumerate(sorted(processes, key=lambda p: (p[key], p['rss']), reverse=True)[:8]):
                 name = ''.join(ch if ch.isprintable() else '?' for ch in process['name'])[:22]
                 value = f"{process['pid']:>6}  {name:<22} {process['cpu']:>7.1f} {byte_size(process['rss']):>11}  {process['state']}"
                 text(x, 742 + row * 23, value, 14, color if row == 0 else WHITE)
-        text(1245, 665, '[ DISKS ]', 16, CYAN)
+        text(1245, 665, tr('[ DISKS ]'), 16, CYAN)
         disks = d['disks']
         if not disks:
-            text(1525, 795, 'No mounted disks', 14, MUTED, 'center')
+            text(1525, 795, tr('No mounted disks'), 14, MUTED, 'center')
         columns = min(2, max(1, len(disks)))
         rows = math.ceil(len(disks) / columns)
         cell_height = min(140, 280 / max(1, rows))
@@ -880,9 +887,9 @@ class SystemDesktop:
                 label_x = cx + side * 75
                 text(label_x, ey, f'{amount / 1e9:.1f} GB', 11, WHITE, anchor)
         divider(973)
-        text(25, 1000, f"{len(processes)} processes · process CPU: 100% = 1 core"
-             + f" · history {min(180, int(self.sampler.timestamps[-1] - self.sampler.timestamps[0]))} s", 13, MUTED)
-        text(1810, 1000, f"step {self.step:g} s · ↕ wheel", 13, CYAN, 'ne')
+        text(25, 1000, f"{len(processes)}{tr(' processes · process CPU: 100% = 1 core')}"
+             + f"{tr(' · history ')}{min(180, int(self.sampler.timestamps[-1] - self.sampler.timestamps[0]))}{tr(' s')}", 13, MUTED)
+        text(1810, 1000, f"{tr('step ')}{self.step:g}{tr(' s · ↕ wheel')}", 13, CYAN, 'ne')
 
 
 def main():

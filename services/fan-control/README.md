@@ -48,3 +48,5 @@ Changes in this source directory need reinstalling into `/usr/local/lib` followe
 by a service restart; editing the source here does not modify the root service.
 
 The service file is a template. Use `scripts/install-fan-service.py --user USER` as root to substitute the numeric UID. Installation does not start the service. The motherboard, PWM channel, AUTO mode, NVIDIA PCI address and systemd sysfs write path are deliberately fixed to the tested hardware. Review and port those together for other hardware.
+
+For later code updates, `sudo python3 scripts/install-fan-service.py --user "$USER" --restart` deploys the tracked source, reloads systemd and restarts the service. The deployed daemon remains root-owned; do not replace it with a link to an editable user checkout.

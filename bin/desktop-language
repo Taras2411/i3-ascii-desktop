@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Select English or the original mixed desktop interface."""
+import argparse
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'share'))
+from desktop_common.i18n import get_language, picker, set_language
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('language', nargs='?', choices=['en', 'mixed'])
+parser.add_argument('--get', action='store_true', help='Print the effective language')
+args = parser.parse_args()
+if args.get:
+    print(get_language())
+elif args.language:
+    set_language(args.language)
+else:
+    picker()
