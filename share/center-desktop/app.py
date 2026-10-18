@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from desktop_common.i18n import tr, get_language, set_language
+from desktop_common.i18n import tr, get_language
 from concurrent.futures import ThreadPoolExecutor
 import calendar
 from datetime import date, datetime, timedelta
@@ -316,18 +316,6 @@ class App:
         scale, ox, oy = self.transform()
         self.clock_face.draw(self.state['clock_style'], now, ox + 25 * scale, oy, scale)
 
-    def language_picker(self):
-        win, body = self.dialog(tr('Language'), 580, 260)
-        self.label(body, tr('Interface language for all three widgets'), CYAN)
-        def choose(language):
-            set_language(language)
-            win.destroy()
-            self.draw()
-        for language, label in [('en', 'English'), ('mixed', tr('Mixed (current style)'))]:
-            selected = ' ✓' if get_language() == language else ''
-            self.dialog_button(body, label + selected, lambda language=language: choose(language))
-        self.label(body, tr('Saved automatically; updates within one second.'), MUTED)
-
     def clock_picker(self):
         win, body = self.dialog(tr('Clock styles / HH:MM:SS'), 860, 670)
         self.label(body, tr('Clock / choose a style'), CYAN)
@@ -375,7 +363,6 @@ class App:
         self.region('clock-choose', 20, 0, 440, 116, self.clock_picker)
         self.text('title', 1810, 8, 'L I F E  /  D E S K', 24, WHITE, 'ne')
         self.text('date', 1810, 53, f"{tr(DAYS[now.weekday()])}  {now:%d.%m.%Y}{tr('   ·   WEEK ')}{now.isocalendar().week:02}", 15, MUTED, 'ne')
-        self.button('language', 1050, 66, '[ EN / MIX ]', self.language_picker, CYAN, 12)
         self.line('top-line', 20, 118, 1800)
         self.draw_calendar(now)
         self.draw_projects()

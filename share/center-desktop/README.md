@@ -23,4 +23,4 @@ Tests: `~/.local/share/center-desktop/venv/bin/python -m unittest discover -s ~/
 
 The live Google read/write acceptance test requires the owner's OAuth JSON and browser authorization. After connection create a clearly named temporary event, edit it, reload the panel, and delete it; verify changes in Google Calendar. Tests use simulated API responses and do not access an account.
 
-Language: click [ EN / MIX ] in the header, or run `desktop-language en|mixed`. The shared setting updates all widgets live. With a linked installation, code comes directly from the repository; private state stays in this data directory. Use `desktop-restart` after Python source changes.
+Language: click the gray gear at the bottom-left of the left monitor, or run `desktop-language en|mixed`. The shared setting updates all widgets live. With a linked installation, code comes directly from the repository; private state stays in this data directory. Use `desktop-restart` after Python source changes.

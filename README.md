@@ -72,7 +72,7 @@ Each widget also starts directly:
 
 ## Language
 
-Click **[ EN / MIX ]** in the central widget header to select **English** or **Mixed (current style)**. All three widgets update without a restart. The choice is saved under `~/.config/i3-ascii-desktop/settings.json`, outside Git. Calendar events, tasks, track metadata and other user content retain their original language.
+Click the **gray gear icon at the bottom-left of the left monitor** to select **English** or **Mixed (current style)**. All three widgets update without a restart. The choice is saved under `~/.config/i3-ascii-desktop/settings.json`, outside Git. Calendar events, tasks, track metadata and other user content retain their original language.
 
 ```sh
 ~/.local/bin/desktop-language en

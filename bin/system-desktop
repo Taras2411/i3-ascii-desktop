@@ -446,8 +446,8 @@ class SystemDesktop:
         self.canvas.bind('<Button-1>', self.pointer_press)
         self.canvas.bind('<B1-Motion>', self.pointer_drag)
         self.canvas.bind('<ButtonRelease-1>', self.pointer_release)
-        self.canvas.bind('<Motion>', lambda _: self.canvas.configure(cursor='hand2'))
-        self.canvas.bind('<Leave>', lambda _: self.canvas.configure(cursor=''))
+        self.canvas.bind('<Motion>', self.pointer_motion)
+        self.canvas.bind('<Leave>', self.pointer_leave)
         self.root.bind('<Configure>', self.configure)
         self.geometry = None
         self.place()
@@ -495,9 +495,12 @@ class SystemDesktop:
         frame = int(self.root.tk.call('wm', 'frame', self.root._w), 0)
         scale, ox, oy = self.transform()
         rectangles = [(20, 140, 580, 230), (486, 8, 368, 92), (986, 8, 368, 92), (1510, 990, 310, 40)]
-        regions = (Rectangle * len(rectangles))(*(Rectangle(
-            round(ox + x * scale), round(oy + y * scale),
-            max(1, round(w * scale)), max(1, round(h * scale))) for x, y, w, h in rectangles))
+        bounds = [(round(ox + x * scale), round(oy + y * scale),
+                   max(1, round(w * scale)), max(1, round(h * scale)))
+                  for x, y, w, h in rectangles]
+        bounds.append(self.settings_bounds())
+        regions = (Rectangle * len(bounds))(*(Rectangle(
+            x, y, w, h) for x, y, w, h in bounds))
         shape.XShapeCombineRectangles(self.xdisplay, frame, 2, 0, 0, ctypes.byref(regions), len(regions), 0, 0)
         x11.XFlush(self.xdisplay)
         self.move_surface()
@@ -569,6 +572,12 @@ class SystemDesktop:
         self.draw()
 
     def pointer_press(self, event):
+        if self.over_settings(event):
+            dialog = getattr(self, 'language_dialog', None)
+            if dialog is None or dialog.poll() is not None:
+                self.language_dialog = subprocess.Popen([
+                    sys.executable, str(Path(__file__).resolve().with_name('desktop-language'))])
+            return
         scale, ox, oy = self.transform()
         x, y = (event.x - ox) / scale, (event.y - oy) / scale
         for device, origin in (('cpu', 486), ('gpu', 986)):
@@ -583,6 +592,42 @@ class SystemDesktop:
                             self.control_fan(dict(op='set', device=device, mode=label))
                             return
         self.toggle_cpu(event)
+
+    def settings_bounds(self):
+        scale, _, _ = self.transform()
+        size = max(28, round(40 * scale))
+        return max(6, round(8 * scale)), self.canvas.winfo_height() - round(24 * scale) - size, size, size
+
+    def over_settings(self, event):
+        x, y, width, height = self.settings_bounds()
+        return x <= event.x < x + width and y <= event.y < y + height
+
+    def pointer_motion(self, event):
+        self.canvas.configure(cursor='hand2')
+        hover = self.over_settings(event)
+        if hover != getattr(self, 'settings_hover', False):
+            self.settings_hover = hover
+            self.draw()
+
+    def pointer_leave(self, event):
+        self.canvas.configure(cursor='')
+        if getattr(self, 'settings_hover', False):
+            self.settings_hover = False
+            self.draw()
+
+    def draw_settings(self):
+        x, y, width, height = self.settings_bounds()
+        cx, cy, radius = x + width / 2, y + height / 2, width * .3
+        color = '#a9afb9' if getattr(self, 'settings_hover', False) else '#747b87'
+        points = []
+        for index in range(32):
+            angle = math.tau * index / 32 - math.pi / 2
+            r = radius * (1 if index % 4 in (1, 2) else .77)
+            points.extend((cx + math.cos(angle) * r, cy + math.sin(angle) * r))
+        self.canvas.create_polygon(*points, fill=color, outline='', tags='language-settings')
+        hole = radius * .36
+        self.canvas.create_oval(cx - hole, cy - hole, cx + hole, cy + hole,
+                                fill='#000000', outline='', tags='language-settings')
 
     def pointer_drag(self, event):
         if not self.drag_fan:
@@ -767,6 +812,7 @@ class SystemDesktop:
         text(20, 15, 'S Y S T E M', 34, CYAN, bold=True)
         self.clock_item = text(1810, 20, datetime.now().strftime('%H:%M:%S'), 30, WHITE, 'ne')
         text(22, 69, socket.gethostname() + ' / LINUX / LIVE', 14, MUTED)
+        self.draw_settings()
         divider(107)
         d = self.sampler.data
         if d is None:
