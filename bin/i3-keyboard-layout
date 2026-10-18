@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Switch the three XKB groups without putting Ukrainian in the Space cycle."""
+
+import ctypes
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+class XkbState(ctypes.Structure):
+    _fields_ = [
+        ("group", ctypes.c_ubyte),
+        ("locked_group", ctypes.c_ubyte),
+        ("base_group", ctypes.c_ushort),
+        ("latched_group", ctypes.c_ushort),
+        ("mods", ctypes.c_ubyte),
+        ("base_mods", ctypes.c_ubyte),
+        ("latched_mods", ctypes.c_ubyte),
+        ("locked_mods", ctypes.c_ubyte),
+        ("compat_state", ctypes.c_ubyte),
+        ("grab_mods", ctypes.c_ubyte),
+        ("compat_grab_mods", ctypes.c_ubyte),
+        ("lookup_mods", ctypes.c_ubyte),
+        ("compat_lookup_mods", ctypes.c_ubyte),
+        ("ptr_buttons", ctypes.c_ushort),
+    ]
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ("space", "ukrainian", "current"):
+        raise SystemExit("usage: i3-keyboard-layout {space|ukrainian|current}")
+
+    if sys.argv[1] != "current":
+        # Xorg defaults can be reapplied when a keyboard is connected. Keep
+        # all three groups and let i3 alone handle the switching shortcuts.
+        settings = subprocess.check_output(["setxkbmap", "-query"], text=True)
+        settings = dict(
+            line.split(":", 1) for line in settings.splitlines() if ":" in line
+        )
+        if settings.get("layout", "").strip() != "us,ru,ua" or settings.get("options", "").strip():
+            subprocess.run(
+                ["setxkbmap", "-layout", "us,ru,ua", "-option", ""], check=True
+            )
+
+    x11 = ctypes.CDLL("libX11.so.6")
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XkbGetState.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(XkbState)]
+    x11.XkbGetState.restype = ctypes.c_int
+    x11.XkbLockGroup.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
+    x11.XkbLockGroup.restype = ctypes.c_int
+    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+    display = x11.XOpenDisplay(None)
+    if not display:
+        raise SystemExit("cannot open X display")
+    try:
+        state = XkbState()
+        if x11.XkbGetState(display, 0x0100, ctypes.byref(state)) != 0:
+            raise SystemExit("cannot read XKB state")
+        current = state.group
+        if sys.argv[1] == "current":
+            print(("EN", "RU", "UA")[current] if current < 3 else current)
+            return
+
+        previous_file = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"i3-keyboard-previous-{os.getuid()}"
+        if sys.argv[1] == "ukrainian":
+            if current == 2:
+                try:
+                    previous = int(previous_file.read_text().strip())
+                except (OSError, ValueError):
+                    previous = 0
+                target = previous if previous in (0, 1) else 0
+            else:
+                previous_file.write_text(str(current if current in (0, 1) else 0))
+                target = 2
+        else:
+            if current == 2:
+                try:
+                    previous = int(previous_file.read_text().strip())
+                except (OSError, ValueError):
+                    previous = 0
+                target = previous if previous in (0, 1) else 0
+            else:
+                target = 1 if current == 0 else 0
+
+        if not x11.XkbLockGroup(display, 0x0100, target):
+            raise SystemExit("cannot change XKB group")
+        x11.XSync(display, 0)
+        subprocess.run(
+            ["pkill", "-SIGRTMIN+4", "-x", "i3status-rs"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    finally:
+        x11.XCloseDisplay(display)
+
+
+if __name__ == "__main__":
+    main()

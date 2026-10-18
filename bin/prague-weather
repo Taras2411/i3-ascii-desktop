@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""An ASCII weather desktop for the rightmost i3 output. No pip dependencies."""
+import argparse
+import ctypes
+import fcntl
+import json
+import logging
+from pathlib import Path
+import queue
+import subprocess
+import threading
+import time
+import tkinter as tk
+from tkinter import font as tkfont
+from datetime import datetime
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo('Europe/Prague')
+CACHE = Path.home() / '.cache/prague-weather'
+REFRESH_STEPS = (60, 120, 300, 600, 900, 1800, 3600)
+PARAMS = dict(latitude=50.0755, longitude=14.4378, timezone='Europe/Prague',
+              forecast_days=4,
+              current='temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m',
+              hourly='temperature_2m,apparent_temperature,precipitation_probability,weather_code',
+              daily='weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max')
+URL = 'https://api.open-meteo.com/v1/forecast?' + urlencode(PARAMS)
+CYAN, WHITE, MUTED, GOLD = '#73daca', '#c0caf5', '#737e9c', '#e0af68'
+BLUE, BORDER, BG = '#7aa2f7', '#293348', '#000000'
+
+ART = {
+    'sun': ['       \\   |   /', '         .---.', '    --  (     )  --', "         `---'", '       /   |   \\'],
+    'moon': ['          _..._', "        .'    /", '       /     (', '       \\      \\', "        `-...__\\"],
+    'part': ['      \\  /', '    _ /"".-.', '      \\_(   ).', '      /(___(__)', ''],
+    'cloud': ['', '         .--.', '      .-(    ).', '     (___.__)__)', ''],
+    'rain': ['', '         .--.', '      .-(    ).', '     (___.__)__)', '       / / / /'],
+    'snow': ['', '         .--.', '      .-(    ).', '     (___.__)__)', '       * * * *'],
+    'storm': ['', '         .--.', '      .-(    ).', '     (___.__)__)', '        /_ /_'],
+    'fog': ['', '     _ - _ - _ -', '      _ - _ - _', '     _ - _ - _ -', ''],
+}
+
+
+def condition(code, day=True):
+    if code == 0:
+        return ('sun', 'Clear', GOLD) if day else ('moon', 'Clear night', BLUE)
+    if code in (1, 2):
+        return 'part', 'Partly cloudy', GOLD
+    if code == 3:
+        return 'cloud', 'Overcast', WHITE
+    if code in (45, 48):
+        return 'fog', 'Fog', MUTED
+    if code in (71, 73, 75, 77, 85, 86):
+        return 'snow', 'Snow', WHITE
+    if code in (95, 96, 99):
+        return 'storm', 'Thunderstorm', GOLD
+    return 'rain', 'Rain', BLUE
+
+
+class StableCanvas(tk.Canvas):
+    """Reuse weather text items so refreshes never erase the desktop."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._items = []
+        self._drawing = False
+
+    def begin_frame(self):
+        self._index = 0
+        self._drawing = True
+
+    def create_text(self, *coordinates, **options):
+        if not self._drawing:
+            return super().create_text(*coordinates, **options)
+        index = self._index
+        self._index += 1
+        if index == len(self._items):
+            item = super().create_text(*coordinates, **options)
+            self._items.append(dict(item=item, coordinates=coordinates, options=options.copy()))
+        else:
+            record = self._items[index]
+            item = record['item']
+            if coordinates != record['coordinates']:
+                self.coords(item, *coordinates)
+                record['coordinates'] = coordinates
+            changes = {key: value for key, value in options.items()
+                       if record['options'].get(key) != value}
+            for key in record['options'].keys() - options.keys():
+                changes[key] = self.itemconfigure(item, key)[3]
+            if changes:
+                self.itemconfigure(item, **changes)
+            record['options'] = options.copy()
+        return item
+
+    def end_frame(self):
+        self._drawing = False
+        for record in self._items[self._index:]:
+            self.delete(record['item'])
+        del self._items[self._index:]
+
+
+def clothing_advice(data, now):
+    """Deterministic clothing rules using feels-like temperature in Celsius."""
+    current, hourly = data['current'], data['hourly']
+    feels = current['apparent_temperature']
+    thresholds = (-10, 0, 8, 15, 20, 25)
+    outfits = ('Down coat, thermal layers, hat, gloves',
+               'Winter coat, hat, gloves', 'Insulated jacket',
+               'Jacket and sweater', 'Light jacket or sweatshirt',
+               'T-shirt, light trousers', 'Light summer clothing')
+    band = lambda value: sum(value >= limit for limit in thresholds)
+    parts = [outfits[band(feels)]]
+    now_local = now.replace(tzinfo=None)
+    times = [datetime.fromisoformat(t) for t in hourly['time']]
+    soon = [i for i, t in enumerate(times)
+            if 0 < (t - now_local).total_seconds() <= 3 * 3600]
+    wet = [i for i in soon
+           if (hourly['precipitation_probability'][i] or 0) >= 40]
+    snow_codes = (71, 73, 75, 77, 85, 86)
+    if current['weather_code'] in snow_codes or any(
+            hourly['weather_code'][i] in snow_codes for i in wet):
+        parts.append('waterproof shoes')
+    elif wet:
+        parts.append('bring an umbrella')
+    if current['wind_speed_10m'] >= 25:
+        parts.append('wind protection')
+    apparent = hourly.get('apparent_temperature', [])
+    evening = [apparent[i] for i, t in enumerate(times)
+               if i < len(apparent) and apparent[i] is not None
+               and t.date() == now_local.date() and t > now_local
+               and 18 <= t.hour <= 23]
+    if evening and feels - min(evening) >= 5 and band(min(evening)) < band(feels):
+        parts.append('sweater for the evening' if feels >= 8 else 'dress warmer this evening')
+    return ' · '.join(parts)
+
+
+def fetch():
+    request = Request(URL, headers={'User-Agent': 'PragueWeatherDesktop/1.0'})
+    with urlopen(request, timeout=25) as response:
+        data = json.load(response)
+    # Reject API errors/incomplete responses before replacing the last good cache.
+    for key in ('current', 'hourly', 'daily'):
+        if not isinstance(data.get(key), dict):
+            raise ValueError('Missing weather section: ' + key)
+    data['_fetched'] = time.time()
+    temporary = CACHE / 'forecast.tmp'
+    temporary.write_text(json.dumps(data), encoding='utf-8')
+    temporary.replace(CACHE / 'forecast.json')
+    return data
+
+
+class WeatherDesktop:
+    def __init__(self):
+        self.step = 900
+        try:
+            saved = json.loads((CACHE / 'settings.json').read_text()).get('step')
+            if saved in REFRESH_STEPS:
+                self.step = saved
+        except (OSError, ValueError):
+            pass
+        self.refresh_timer = None
+        self.last_refresh = time.monotonic()
+        self.root = tk.Tk(className='PragueWeather')
+        self.root.withdraw()
+        # Bypass the window manager entirely: no tiling, focus, task entry or
+        # workspace ownership. The surface lives at the bottom of the X root.
+        self.root.overrideredirect(True)
+        self.root.title('Prague ASCII Weather')
+        self.root.configure(background=BG)
+        self.root.wm_attributes('-type', 'desktop')
+        self.canvas = StableCanvas(self.root, bg=BG, highlightthickness=0, takefocus=0)
+        self.canvas.pack(fill='both', expand=True)
+        self.canvas.bind('<Button-4>', self.change_step)
+        self.canvas.bind('<Button-5>', self.change_step)
+        self.canvas.bind('<MouseWheel>', self.change_step)
+        self.canvas.bind('<Motion>', lambda _: self.canvas.configure(cursor='hand2'))
+        self.canvas.bind('<Leave>', lambda _: self.canvas.configure(cursor=''))
+        self.root.bind('<Configure>', self.configure)
+        self.messages = queue.Queue()
+        self.data, self.error, self.busy = None, False, False
+        self.geometry = None
+        try:
+            self.data = json.loads((CACHE / 'forecast.json').read_text())
+        except (OSError, ValueError):
+            pass
+        self.place()
+        self.root.deiconify()
+        self.root.update_idletasks()
+        self.make_click_through()
+        self.root.lower()
+        self.refresh()
+        self.tick()
+
+    def make_click_through(self):
+        # Only the refresh control receives pointer events; the rest is wallpaper.
+        x11 = ctypes.CDLL('libX11.so.6')
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        if not getattr(self, 'xdisplay', None):
+            self.xdisplay = x11.XOpenDisplay(None)
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        shape = ctypes.CDLL('libXext.so.6')
+        shape.XShapeCombineRectangles.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        frame = int(self.root.tk.call('wm', 'frame', self.root._w), 0)
+        class Rectangle(ctypes.Structure):
+            _fields_ = [('x', ctypes.c_short), ('y', ctypes.c_short),
+                        ('width', ctypes.c_ushort), ('height', ctypes.c_ushort)]
+        w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
+        scale = min(w / 1024, h / 1280)
+        ox, oy = (w - 900 * scale) / 2, (h - 1220 * scale) / 2
+        region = Rectangle(round(ox + 650 * scale), round(oy + 1178 * scale),
+                           max(1, round(210 * scale)), max(1, round(35 * scale)))
+        shape.XShapeCombineRectangles(self.xdisplay, frame, 2, 0, 0, ctypes.byref(region), 1, 0, 0)
+        x11.XFlush(self.xdisplay)
+        self.move_surface()
+
+    def move_surface(self):
+        if not getattr(self, 'xdisplay', None) or not getattr(self, 'output_rect', None):
+            return
+        lib = ctypes.CDLL('libX11.so.6')
+        lib.XMoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
+        lib.XSetWindowBackground.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
+        lib.XClearWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        lib.XGetGeometry.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+        lib.XFlush.argtypes = [ctypes.c_void_p]
+        frame = int(self.root.tk.call('wm', 'frame', self.root._w), 0)
+
+        def position(window):
+            root, x, y = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int()
+            width, height, border, depth = (ctypes.c_uint() for _ in range(4))
+            lib.XGetGeometry(self.xdisplay, window, ctypes.byref(root), ctypes.byref(x), ctypes.byref(y),
+                ctypes.byref(width), ctypes.byref(height), ctypes.byref(border), ctypes.byref(depth))
+            return x.value, y.value
+
+        target = self.output_rect['x'], self.output_rect['y']
+        if frame != getattr(self, '_background_frame', None):
+            lib.XSetWindowBackground(self.xdisplay, frame, 0)
+            self._background_frame = frame
+        moved = False
+        if position(frame) != target:
+            lib.XMoveWindow(self.xdisplay, frame, *target)
+            moved = True
+        if position(self.root.winfo_id()) != (0, 0):
+            lib.XMoveWindow(self.xdisplay, self.root.winfo_id(), 0, 0)
+            moved = True
+        if moved:
+            lib.XClearWindow(self.xdisplay, frame)
+        lib.XFlush(self.xdisplay)
+
+    def configure(self, _):
+        size = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if size != getattr(self, '_configured_size', None):
+            self._configured_size = size
+            self.draw()
+            if getattr(self, 'xdisplay', None):
+                self.make_click_through()
+
+    def place(self):
+        try:
+            outputs = json.loads(subprocess.check_output(
+                ['i3-msg', '-t', 'get_outputs'], timeout=3))
+            active = [o for o in outputs if o['active']]
+            if active:
+                r = max(active, key=lambda o: o['rect']['x'])['rect']
+                self.output_rect = r
+                geometry = f"{r['width']}x{r['height']}+{r['x']}+{r['y']}"
+                if geometry != self.geometry:
+                    self.root.geometry(geometry)
+                    self.geometry = geometry
+                    self.root.lower()
+                    self.root.after_idle(self.move_surface)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            logging.exception('Cannot query monitor layout')
+        self.root.after(10000, self.place)
+
+    def change_step(self, event):
+        w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
+        scale = min(w / 1024, h / 1280)
+        ox, oy = (w - 900 * scale) / 2, (h - 1220 * scale) / 2
+        x, y = (event.x - ox) / scale, (event.y - oy) / scale
+        if not (650 <= x <= 860 and 1178 <= y <= 1213):
+            return
+        direction = -1 if event.num == 4 or getattr(event, 'delta', 0) > 0 else 1
+        index = max(0, min(len(REFRESH_STEPS) - 1, REFRESH_STEPS.index(self.step) + direction))
+        step = REFRESH_STEPS[index]
+        if step == self.step:
+            return 'break'
+        self.step = step
+        (CACHE / 'settings.json').write_text(json.dumps({'step': self.step}))
+        if not self.busy:
+            self.schedule_refresh(max(.001, self.last_refresh + self.step - time.monotonic()))
+        self.draw()
+        return 'break'
+
+    def schedule_refresh(self, seconds):
+        if self.refresh_timer is not None:
+            self.root.after_cancel(self.refresh_timer)
+        self.refresh_timer = self.root.after(max(1, round(seconds * 1000)), self.refresh)
+
+    def refresh(self):
+        self.refresh_timer = None
+        if self.busy:
+            return
+        self.busy = True
+        def worker():
+            try:
+                self.messages.put((fetch(), False))
+            except Exception:
+                logging.exception('Weather refresh failed')
+                self.messages.put((None, True))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def tick(self):
+        try:
+            data, self.error = self.messages.get_nowait()
+            self.busy = False
+            if data:
+                self.data = data
+            self.last_refresh = time.monotonic()
+            self.schedule_refresh(60 if self.error else self.step)
+        except queue.Empty:
+            pass
+        self.draw()
+        self.root.after(1000 - int(time.time() * 1000) % 1000, self.tick)
+
+    def draw(self):
+        c = self.canvas
+        w, h = c.winfo_width(), c.winfo_height()
+        now = datetime.now(TZ)
+        signature = (w, h, now.strftime('%Y-%m-%d %H:%M:%S'),
+                     self.data.get('_fetched') if self.data else None, self.error, self.step)
+        if signature == getattr(self, '_draw_signature', None):
+            return
+        c.begin_frame()
+        try:
+            self.render(now)
+        finally:
+            c.end_frame()
+        self._draw_signature = signature
+
+    def render(self, now):
+        c = self.canvas
+        w, h = c.winfo_width(), c.winfo_height()
+        scale = min(w / 1024, h / 1280)
+        if scale < 0.1:
+            return
+        ox, oy = (w - 900 * scale) / 2, (h - 1220 * scale) / 2
+
+        def text(x, y, value, size=16, color=WHITE, anchor='nw', bold=False):
+            c.create_text(ox + x * scale, oy + y * scale, text=value,
+                          fill=color, anchor=anchor,
+                          font=('Noto Sans Mono', -max(8, int(size * scale)), 'bold' if bold else 'normal'))
+
+        def line(y):
+            text(35, y, '+' + '-' * 66 + '+', 20, BORDER)
+
+        text(40, 15, 'P R A G U E', 34, CYAN, bold=True)
+        text(855, 20, now.strftime('%H:%M:%S'), 34, WHITE, 'ne')
+        weekdays = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
+        text(42, 67, '50.0755 N / 14.4378 E', 14, MUTED)
+        text(855, 67, weekdays[now.weekday()] + now.strftime('  %d.%m.%Y'), 14, MUTED, 'ne')
+        line(102)
+        if not self.data:
+            text(450, 380, 'Loading forecast...' if not self.error else 'Offline. Retrying in a minute.', 20, MUTED, 'center')
+            return
+        d = self.data
+        current = d['current']
+        kind, label, color = condition(current['weather_code'], current['is_day'])
+        text(42, 145, '[ NOW ]', 15, CYAN)
+        text(48, 194, '\n'.join(ART[kind]), 31, color)
+        text(820, 195, f"{current['temperature_2m']:+.0f}°", 94, WHITE, 'ne', True)
+        text(820, 310, label, 18, color, 'ne')
+        text(820, 348, f"Feels like {current['apparent_temperature']:+.0f}°C", 16, MUTED, 'ne')
+        text(48, 395, f"WIND  {current['wind_speed_10m']:.0f} km/h", 17, BLUE)
+        text(820, 395, f"HUMIDITY  {current['relative_humidity_2m']}%", 17, CYAN, 'ne')
+        text(48, 433, 'CLOTHING', 13, CYAN)
+        advice = clothing_advice(d, now)
+        size = 14
+        while size > 8 and tkfont.Font(family='Noto Sans Mono',
+                size=-max(8, int(size * scale))).measure(advice) > 670 * scale:
+            size -= 1
+        text(150, 432, advice, size, WHITE)
+        line(455)
+        text(42, 495, '[ TEMPERATURE / NEXT 12 HOURS ]', 15, CYAN)
+        hourly = d['hourly']
+        upcoming = [i for i, t in enumerate(hourly['time'])
+                    if t > now.strftime('%Y-%m-%dT%H:%M')][:12]
+        if upcoming:
+            temperatures = [hourly['temperature_2m'][i] for i in upcoming]
+            # Keep small fluctuations gentle, while fitting larger swings.
+            span = max(4, max(temperatures) - min(temperatures))
+            ceiling = (max(temperatures) + min(temperatures) + span) / 2
+            rows = [(ceiling - value) / span * 7 for value in temperatures]
+            columns = max(1, (len(upcoming) - 1) * 10)
+            dx = 760 / max(1, (len(upcoming) - 1) * 10)
+            for col in range(columns + 1):
+                segment = min(col // 10, max(0, len(rows) - 2))
+                t = (col - segment * 10) / 10
+                start, end = rows[segment], rows[min(segment + 1, len(rows) - 1)]
+                # Smooth interpolation without overshooting hourly values.
+                level = start + (end - start) * t * t * (3 - 2 * t)
+                row = round(level)
+                x = 70 + col * dx
+                for fill_row in range(row + 1, 9):
+                    text(x, 558 + fill_row * 11, '.', 12, '#3c3020', 'center')
+                slope = (end - start) * 6 * t * (1 - t) / 10
+                glyph = '\\' if slope > .12 else '/' if slope < -.12 else '_'
+                if col % 10 == 0:
+                    glyph = 'o'
+                text(x, 558 + row * 11, glyph, 12, GOLD, 'center')
+            for col, i in enumerate(upcoming):
+                x = 70 + col * 10 * dx
+                text(x, 542 + round(rows[col]) * 11,
+                     f"{temperatures[col]:.0f}°", 14, GOLD, 's')
+                text(x, 665, hourly['time'][i][11:16], 12, MUTED, 'n')
+        else:
+            text(450, 600, 'Hourly forecast expired. Updating...', 15, MUTED, 'center')
+        line(694)
+        text(42, 730, '[ PRECIPITATION CHANCE / NEXT 12 HOURS ]', 15, CYAN)
+        if upcoming:
+            # A fixed percentage scale keeps a small chance of rain visually
+            # small, even on days when every hourly probability is near zero.
+            top, bottom = 780, 857
+            for percent in (100, 50, 0):
+                y = bottom - percent / 100 * (bottom - top)
+                text(49, y, str(percent), 10, MUTED, 'e')
+                text(70, y, '-' * 111, 12, BORDER, 'w')
+            spacing = 760 / max(1, len(upcoming) - 1)
+            for col, i in enumerate(upcoming):
+                x = 70 + col * spacing
+                chance = hourly['precipitation_probability'][i]
+                if chance is None:
+                    text(x, bottom - 16, '--', 12, MUTED, 's')
+                else:
+                    chance = max(0, min(100, chance))
+                    y = bottom - chance / 100 * (bottom - top)
+                    for fill_y in range(round(y) + 7, bottom, 7):
+                        text(x, fill_y, '###', 12, '#355b87', 'center')
+                    text(x, y, '---', 12, BLUE, 'center')
+                    text(x, y - 11, f'{chance:.0f}%', 13, BLUE, 's')
+                text(x, 880, hourly['time'][i][11:16], 12, MUTED, 'n')
+        else:
+            text(450, 815, 'Waiting for a fresh forecast...', 15, MUTED, 'center')
+        line(910)
+        text(42, 945, '[ 3-DAY FORECAST ]', 15, CYAN)
+        daily = d['daily']
+        # Match dates instead of assuming the cached first day is still today.
+        indices = [i for i, day in enumerate(daily['time']) if day >= now.date().isoformat()][:3]
+        for row, i in enumerate(indices):
+            y = 985 + row * 43
+            date = datetime.fromisoformat(daily['time'][i])
+            day_label = 'Today' if date.date() == now.date() else weekdays[date.weekday()] + date.strftime(' %d.%m')
+            _, desc, shade = condition(daily['weather_code'][i])
+            text(48, y, day_label, 17, WHITE)
+            text(240, y, desc, 15, shade)
+            text(650, y, f"{daily['temperature_2m_min'][i]:+.0f} / {daily['temperature_2m_max'][i]:+.0f}°", 17, WHITE, 'ne')
+            text(820, y, f"{daily['precipitation_probability_max'][i]}%", 16, BLUE, 'ne')
+        line(1110)
+        if indices:
+            i = indices[0]
+            text(48, 1150, f"SUNRISE {daily['sunrise'][i][11:16]}   SUNSET {daily['sunset'][i][11:16]}", 14, GOLD)
+        age = time.time() - d.get('_fetched', 0)
+        updated = datetime.fromtimestamp(d.get('_fetched', 0), TZ).strftime('%d.%m %H:%M')
+        status = 'offline · ' if self.error else ''
+        if age > 1800:
+            status += 'stale data · '
+        text(48, 1187, f"Open-Meteo · {status}{updated}", 12, MUTED)
+        text(850, 1187, f"step {self.step // 60} min · ↕ wheel", 12, CYAN, 'ne')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--fetch', action='store_true', help='Update cache without opening the desktop')
+    args = parser.parse_args()
+    CACHE.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=CACHE / 'weather.log', level=logging.WARNING)
+    if args.fetch:
+        fetch()
+        return
+    with (CACHE / 'widget.lock').open('w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        widget = WeatherDesktop()
+        widget.root.mainloop()
+
+
+if __name__ == '__main__':
+    main()

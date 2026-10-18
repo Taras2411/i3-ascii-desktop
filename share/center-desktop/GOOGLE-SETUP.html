@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Google Calendar setup · i3 ASCII Desktop</title>
+<style>body{background:#0b0e15;color:#c0caf5;font:17px/1.7 monospace;max-width:900px;margin:50px auto;padding:25px}a,h1,h2{color:#73daca}code{color:#e0af68}</style></head><body>
+<h1>Google Calendar setup</h1>
+<p>Calendar access is optional. Sign-in happens in your browser; the widget never receives your Google password. You supply your own OAuth client.</p>
+<ol>
+<li>Create a project in <a href="https://console.cloud.google.com/">Google Cloud Console</a>.</li>
+<li>Enable <a href="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com">Google Calendar API</a>.</li>
+<li>Configure Google Auth Platform branding and audience. For a personal account choose External. While Testing, add your sign-in account under Audience → Test users.</li>
+<li>Under Clients create a <strong>Desktop app</strong> OAuth client and download its JSON. Web application clients are unsupported.</li>
+<li>Click <strong>Connect Google → Import OAuth JSON and sign in</strong> on the widget, select the file and authorize in the browser.</li>
+<li>Open calendar settings to choose displayed calendars. The primary calendar is initially selected. Scroll over its <strong>step</strong> label to change refresh timing.</li>
+</ol>
+<p>Cloud setup reference: <a href="https://developers.google.com/workspace/calendar/api/quickstart/python">Google's official Calendar Python quickstart</a>.</p>
+<h2>403 access_denied</h2>
+<p>If Google says the application has not completed verification and is limited to developer-approved testers, add the account you are signing in with to the same project's Test users list. Then retry sign-in from the widget. Managed Workspace accounts can also have administrator restrictions.</p>
+<h2>Token expiry</h2>
+<p>External applications in Testing receive refresh tokens that expire after seven days for these Calendar scopes. Production status changes those testing restrictions but does not guarantee verification or remove all account policies. See <a href="https://developers.google.com/identity/protocols/oauth2#expiration">Google's token-expiration documentation</a>. Reconnect when access expires or is revoked.</p>
+<h2>Permissions and event edits</h2>
+<p>The widget requests calendar-list read access and event access. It reads selected calendars and creates, edits or deletes events only where the account can write. Read-only calendars are labeled. All-day end dates in the form are inclusive. Calendar times use Europe/Prague; nonexistent daylight-saving times are rejected. Recurring edits affect only the selected occurrence. Full-series changes open in Google Calendar.</p>
+<h2>Private files</h2>
+<p><code>~/.local/share/center-desktop/</code> holds <code>google-client.json</code>, <code>google-token.json</code>, <code>calendar-cache.json</code>, settings and any pending write. Personal JSON uses mode 0600. Never commit these files. Remove access through your Google account's connected-app settings to revoke the token.</p>
+<h2>Interrupted writes</h2>
+<p>Retry the unchanged event form after a lost response. The saved event identifier prevents an additional insertion. After a restart, use Settings → Check and finish previous write before starting another event. Edits detect changes made elsewhere; refresh and reopen the event on a conflict.</p>
+</body></html>

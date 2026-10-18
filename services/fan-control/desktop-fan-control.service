@@ -1,0 +1,28 @@
+[Unit]
+Description=Desktop CPU and GPU fan controller
+After=systemd-modules-load.service
+
+[Service]
+Type=notify
+Environment=DESKTOP_FAN_UID=@USER_UID@
+ExecStart=/usr/bin/python3 -I /usr/local/lib/desktop-fan-control.py
+ExecStopPost=/usr/bin/python3 -I /usr/local/lib/desktop-fan-control.py --restore
+Restart=on-failure
+RestartSec=2
+WatchdogSec=10
+TimeoutStopSec=5
+RuntimeDirectory=desktop-fans
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/sys/devices/platform/nct6775.656
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SYS_ADMIN CAP_CHOWN
+
+[Install]
+WantedBy=multi-user.target

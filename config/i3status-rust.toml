@@ -1,0 +1,38 @@
+[[block]]
+block = "disk_space"
+path = "/"
+info_type = "available"
+format = " $icon $available "
+
+[[block]]
+block = "memory"
+format = " $icon $mem_used_percents "
+
+[[block]]
+block = "cpu"
+format = " $icon $utilization "
+
+[[block]]
+block = "net"
+format = " $icon {$ssid $signal_strength|Wired} ↓$speed_down ↑$speed_up "
+interval = 1
+
+[[block]]
+block = "sound"
+format = " $icon{ $volume|} "
+
+[[block]]
+block = "music"
+format = " $combo.str(max_w:40,rot_interval:0.5) $play "
+
+[[block]]
+block = "custom"
+command = "$HOME/.local/bin/i3-keyboard-layout current"
+interval = "once"
+signal = 4
+format = " $text "
+
+[[block]]
+block = "time"
+interval = 1
+format = " $timestamp.datetime(f:'%A %Y-%m-%d %H:%M:%S') "

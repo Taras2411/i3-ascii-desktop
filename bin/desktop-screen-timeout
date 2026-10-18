@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Apply a two-hour idle timeout to X11 blanking and monitor power saving."""
+import ctypes as c
+
+SECONDS = 2 * 60 * 60
+x11 = c.CDLL('libX11.so.6')
+dpms = c.CDLL('libXext.so.6')
+x11.XOpenDisplay.argtypes = [c.c_char_p]
+x11.XOpenDisplay.restype = c.c_void_p
+x11.XCloseDisplay.argtypes = [c.c_void_p]
+x11.XSync.argtypes = [c.c_void_p, c.c_int]
+x11.XSetScreenSaver.argtypes = [c.c_void_p] + [c.c_int] * 4
+x11.XGetScreenSaver.argtypes = [c.c_void_p] + [c.POINTER(c.c_int)] * 4
+dpms.DPMSCapable.argtypes = [c.c_void_p]
+dpms.DPMSSetTimeouts.argtypes = [c.c_void_p] + [c.c_ushort] * 3
+dpms.DPMSGetTimeouts.argtypes = [c.c_void_p] + [c.POINTER(c.c_ushort)] * 3
+dpms.DPMSEnable.argtypes = [c.c_void_p]
+
+display = x11.XOpenDisplay(None)
+if not display:
+    raise SystemExit('Cannot open X display')
+try:
+    x11.XSetScreenSaver(display, SECONDS, 0, 1, 1)
+    if not dpms.DPMSCapable(display):
+        raise SystemExit('Display does not support DPMS')
+    dpms.DPMSSetTimeouts(display, SECONDS, SECONDS, SECONDS)
+    dpms.DPMSEnable(display)
+    x11.XSync(display, 0)
+    saver = [c.c_int() for _ in range(4)]
+    timers = [c.c_ushort() for _ in range(3)]
+    x11.XGetScreenSaver(display, *(c.byref(value) for value in saver))
+    dpms.DPMSGetTimeouts(display, *(c.byref(value) for value in timers))
+    if saver[0].value != SECONDS or any(value.value != SECONDS for value in timers):
+        raise SystemExit('X server did not retain the requested timeout')
+    print('Screen blanking and DPMS: 7200 seconds (2 hours)')
+finally:
+    x11.XCloseDisplay(display)

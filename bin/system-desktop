@@ -1,0 +1,909 @@
+#!/usr/bin/env python3
+"""ASCII system dashboard with optional privileged fan controls below windows on the leftmost i3 output."""
+import argparse
+from collections import deque
+import ctypes
+from datetime import datetime
+import fcntl
+import json
+import logging
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import time
+import tkinter as tk
+
+CYAN, WHITE, MUTED = '#73daca', '#c0caf5', '#737e9c'
+GOLD, BLUE, BORDER = '#e0af68', '#7aa2f7', '#293348'
+PURPLE = '#bb9af7'
+CACHE = Path.home() / '.cache/system-desktop'
+INTERVAL, SAMPLES = 2, 361
+REFRESH_STEPS = (.5, 1, 2, 3, 5, 10)
+FAN_SOCKET = '/run/desktop-fans/control.sock'
+
+
+def fan_request(request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(.6)
+        connection.connect(FAN_SOCKET)
+        connection.sendall(json.dumps(request).encode() + b'\n')
+        packet = bytearray()
+        while b'\n' not in packet and len(packet) < 16384:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            packet.extend(chunk)
+    response = json.loads(packet)
+    if not response.get('ok'):
+        raise OSError(response.get('error', 'Fan control failed'))
+    return response['fans']
+
+
+class StableCanvas(tk.Canvas):
+    """Keep canvas items alive and send only changed values to Tk."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pool = {}
+        self._frame_active = False
+        self._last_order = ()
+
+    def begin_frame(self):
+        self._counts, self._order = {}, []
+        self._frame_active = True
+
+    def _create(self, kind, args, options):
+        if not self._frame_active:
+            return super()._create(kind, args, options)
+        index = self._counts.get(kind, 0)
+        self._counts[kind] = index + 1
+        items = self._pool.setdefault(kind, [])
+        coordinates = tuple(tk._flatten(args))
+        if index == len(items):
+            item = super()._create(kind, args, options)
+            record = dict(item=item, coordinates=coordinates, options=options.copy())
+            items.append(record)
+        else:
+            record = items[index]
+            item = record['item']
+            if coordinates != record['coordinates']:
+                self.coords(item, *coordinates)
+                record['coordinates'] = coordinates
+            changes = {key: value for key, value in options.items()
+                       if record['options'].get(key) != value}
+            for key in record['options'].keys() - options.keys():
+                changes[key] = self.itemconfigure(item, key)[3]
+            if changes:
+                self.itemconfigure(item, **changes)
+            record['options'] = options.copy()
+        self._order.append(item)
+        return item
+
+    def end_frame(self):
+        self._frame_active = False
+        for kind, items in self._pool.items():
+            used = self._counts.get(kind, 0)
+            for record in items[used:]:
+                self.delete(record['item'])
+            del items[used:]
+        order = tuple(self._order)
+        if order != self._last_order:
+            for item in order:
+                self.tag_raise(item)
+            self._last_order = order
+
+
+def byte_size(value):
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+        if abs(value) < 1024 or unit == 'TiB':
+            return f'{value:.1f} {unit}'
+        value /= 1024
+
+
+def smooth_samples(values, steps=8):
+    """Monotone cubic interpolation: preserve samples and never invent peaks."""
+    if len(values) < 2:
+        return list(values)
+    slopes = [b - a for a, b in zip(values, values[1:])]
+    tangents = [slopes[0]]
+    for left, right in zip(slopes, slopes[1:]):
+        tangents.append(2 * left * right / (left + right) if left * right > 0 else 0)
+    tangents.append(slopes[-1])
+    result = []
+    for i, (start, end) in enumerate(zip(values, values[1:])):
+        for step in range(steps):
+            t = step / steps
+            value = ((2 * t**3 - 3 * t**2 + 1) * start
+                     + (t**3 - 2 * t**2 + t) * tangents[i]
+                     + (-2 * t**3 + 3 * t**2) * end
+                     + (t**3 - t**2) * tangents[i + 1])
+            result.append(max(min(start, end), min(max(start, end), value)))
+    result.append(values[-1])
+    return result
+
+
+def cpu_counters():
+    result = {}
+    for line in Path('/proc/stat').read_text().splitlines():
+        fields = line.split()
+        if fields[0].startswith('cpu'):
+            ticks = list(map(int, fields[1:9]))  # guest time is already in user/nice
+            result[fields[0]] = (sum(ticks), ticks[3] + ticks[4])
+    return result
+
+
+def network_counters():
+    # Use the default route, avoiding double counting bridges and veth devices.
+    routes = []
+    for line in Path('/proc/net/route').read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[1] == '00000000' and int(fields[3], 16) & 1:
+            routes.append((int(fields[6]), fields[0]))
+    if routes:
+        interface = min(routes)[1]
+    else:
+        routes6 = Path('/proc/net/ipv6_route')
+        for line in routes6.read_text().splitlines() if routes6.exists() else []:
+            fields = line.split()
+            if fields[0] == '0' * 32 and fields[1] == '00' and fields[-1] != 'lo':
+                routes.append((int(fields[5], 16), fields[-1]))
+        interface = min(routes)[1] if routes else None
+    if interface:
+        for line in Path('/proc/net/dev').read_text().splitlines()[2:]:
+            name, values = line.split(':', 1)
+            if name.strip() == interface:
+                fields = values.split()
+                return interface, int(fields[0]), int(fields[8])
+    return None, 0, 0
+
+
+def process_counters():
+    processes = {}
+    pages = os.sysconf('SC_PAGE_SIZE')
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            stat = (entry / 'stat').read_text()
+            name, _, tail = stat.partition('(')[2].rpartition(')')
+            fields = tail.split()
+            pid = int(entry.name)
+            identity = (pid, int(fields[19]))  # starttime protects against PID reuse
+            processes[identity] = dict(pid=pid, name=name, state=fields[0],
+                ticks=int(fields[11]) + int(fields[12]),
+                rss=max(0, int(fields[21])) * pages)
+        except (OSError, ValueError, IndexError):
+            # Processes may exit or become inaccessible while /proc is scanned.
+            continue
+    return processes
+
+
+def cpu_temperature():
+    values = []
+    for sensor in Path('/sys/class/hwmon').glob('hwmon*'):
+        try:
+            if (sensor / 'name').read_text().strip() not in ('coretemp', 'k10temp', 'zenpower'):
+                continue
+            values.extend(int(p.read_text()) / 1000 for p in sensor.glob('temp*_input'))
+        except (OSError, ValueError):
+            continue
+    return max(values) if values else None
+
+
+def cpu_fan_metrics():
+    try:
+        board = Path('/sys/class/dmi/id/board_name').read_text().strip()
+        for sensor in Path('/sys/class/hwmon').glob('hwmon*'):
+            name = (sensor / 'name').read_text().strip()
+            # The board's CPU_FAN1 is wired to Nuvoton's second tachometer.
+            inputs = []
+            if board == 'H310M-HDV/M.2' and name == 'nct6791':
+                inputs = [sensor / 'fan2_input']
+            else:
+                for label in sensor.glob('fan*_label'):
+                    if 'cpu' in label.read_text().lower():
+                        inputs.append(label.with_name(label.name.replace('_label', '_input')))
+            for path in inputs:
+                rpm = int(path.read_text())
+                pwm_path = path.with_name(path.name.replace('fan', 'pwm').replace('_input', ''))
+                pwm = int(pwm_path.read_text()) if pwm_path.exists() else None
+                percent = pwm / 255 * 100 if pwm is not None and 0 <= pwm <= 255 else None
+                return dict(cpu_fan_rpm=rpm, cpu_fan_percent=percent)
+    except (OSError, ValueError):
+        pass
+    return dict(cpu_fan_rpm=None, cpu_fan_percent=None)
+
+
+def mounted_disks():
+    disks, seen = [], set()
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        before, after = line.split(' - ', 1)
+        fields, filesystem = before.split(), after.split()
+        target = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), fields[4])
+        source = filesystem[1]
+        if not source.startswith('/dev/') or target in ('/boot', '/boot/efi') or fields[2] in seen:
+            continue
+        try:
+            usage = shutil.disk_usage(target)
+        except OSError:
+            continue
+        if not usage.total:
+            continue
+        seen.add(fields[2])
+        # As in df, percentages describe the space available to this user.
+        percent = usage.used / max(1, usage.used + usage.free) * 100
+        disks.append(dict(target=target, source=source, used=usage.used,
+                          free=usage.free, total=usage.total, percent=percent))
+    return sorted(disks, key=lambda d: (d['target'] != '/', d['target']))
+
+
+class GpuMetrics:
+    def __init__(self):
+        cards = sorted(p for p in Path('/sys/class/drm').glob('card*') if p.name[4:].isdigit())
+        self.device = cards[0] / 'device' if cards else None
+        self.name, self.driver, self.capacity = 'GPU', 'unavailable', None
+        self.nvml, self.nvml_handle = None, ctypes.c_void_p()
+        if self.device:
+            self.driver = (self.device / 'driver').resolve().name
+            try:
+                line = subprocess.check_output(['lspci', '-s', self.device.resolve().name],
+                                               text=True, timeout=2).strip()
+                self.name = line.split('[')[1].split(']')[0] if '[' in line else 'GPU'
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if self.driver == 'nouveau':
+                try:
+                    with open('/dev/dri/renderD128', 'rb', buffering=0) as node:
+                        query = bytearray(struct.pack('QQ', 8, 0))
+                        fcntl.ioctl(node.fileno(), 0xC0106440, query, True)
+                        self.capacity = struct.unpack('QQ', query)[1]
+                except OSError:
+                    pass
+            elif self.driver == 'nvidia':
+                self.init_nvml()
+
+    def init_nvml(self):
+        try:
+            lib = ctypes.CDLL('libnvidia-ml.so.1')
+            lib.nvmlInit_v2.argtypes = []
+            lib.nvmlDeviceGetHandleByPciBusId_v2.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+            lib.nvmlDeviceGetName.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+            lib.nvmlDeviceGetUtilizationRates.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            lib.nvmlDeviceGetMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            if hasattr(lib, 'nvmlDeviceGetMemoryInfo_v2'):
+                lib.nvmlDeviceGetMemoryInfo_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            lib.nvmlDeviceGetTemperature.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)]
+            lib.nvmlDeviceGetFanSpeed.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+            if hasattr(lib, 'nvmlDeviceGetFanSpeedRPM'):
+                lib.nvmlDeviceGetFanSpeedRPM.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            if lib.nvmlInit_v2() != 0:
+                return
+            address = self.device.resolve().name.encode('ascii')
+            if lib.nvmlDeviceGetHandleByPciBusId_v2(address, ctypes.byref(self.nvml_handle)) != 0:
+                lib.nvmlShutdown()
+                return
+            name = ctypes.create_string_buffer(96)
+            if lib.nvmlDeviceGetName(self.nvml_handle, name, len(name)) == 0:
+                self.name = name.value.decode('utf-8', errors='replace').removeprefix('NVIDIA ')
+            self.nvml = lib
+        except (OSError, AttributeError):
+            logging.exception('NVIDIA telemetry initialization failed')
+
+    def sample(self):
+        def read(path):
+            try:
+                return int(path.read_text())
+            except (OSError, ValueError):
+                return None
+        busy = used = total = temp = fan_percent = fan_rpm = None
+        if self.device:
+            busy = read(self.device / 'gpu_busy_percent')
+            used = read(self.device / 'mem_info_vram_used')
+            total = read(self.device / 'mem_info_vram_total') or self.capacity
+            for path in self.device.glob('hwmon/hwmon*/temp1_input'):
+                value = read(path)
+                if value is not None:
+                    temp = value / 1000
+                    break
+        if self.nvml is not None:
+            class Utilization(ctypes.Structure):
+                _fields_ = [('gpu', ctypes.c_uint), ('memory', ctypes.c_uint)]
+            class Memory(ctypes.Structure):
+                _fields_ = [('total', ctypes.c_ulonglong), ('free', ctypes.c_ulonglong),
+                            ('used', ctypes.c_ulonglong)]
+            class MemoryV2(ctypes.Structure):
+                _fields_ = [('version', ctypes.c_uint), ('total', ctypes.c_ulonglong),
+                            ('reserved', ctypes.c_ulonglong), ('free', ctypes.c_ulonglong),
+                            ('used', ctypes.c_ulonglong)]
+            utilization, memory, temperature = Utilization(), Memory(), ctypes.c_uint()
+            if self.nvml.nvmlDeviceGetUtilizationRates(self.nvml_handle, ctypes.byref(utilization)) == 0:
+                busy = utilization.gpu
+            if self.nvml.nvmlDeviceGetMemoryInfo(self.nvml_handle, ctypes.byref(memory)) == 0:
+                used, total = memory.used, memory.total
+            # Match nvidia-smi's allocated memory, excluding driver reservations.
+            if hasattr(self.nvml, 'nvmlDeviceGetMemoryInfo_v2'):
+                memory_v2 = MemoryV2(version=ctypes.sizeof(MemoryV2) | (2 << 24))
+                if self.nvml.nvmlDeviceGetMemoryInfo_v2(self.nvml_handle, ctypes.byref(memory_v2)) == 0:
+                    used, total = memory_v2.used, memory_v2.total
+            if self.nvml.nvmlDeviceGetTemperature(self.nvml_handle, 0, ctypes.byref(temperature)) == 0:
+                temp = temperature.value
+            fan_speed = ctypes.c_uint()
+            if self.nvml.nvmlDeviceGetFanSpeed(self.nvml_handle, ctypes.byref(fan_speed)) == 0:
+                fan_percent = fan_speed.value
+            if hasattr(self.nvml, 'nvmlDeviceGetFanSpeedRPM'):
+                class FanSpeed(ctypes.Structure):
+                    _fields_ = [('version', ctypes.c_uint), ('fan', ctypes.c_uint), ('speed', ctypes.c_uint)]
+                fan = FanSpeed(version=ctypes.sizeof(FanSpeed) | (1 << 24), fan=0)
+                if self.nvml.nvmlDeviceGetFanSpeedRPM(self.nvml_handle, ctypes.byref(fan)) == 0:
+                    fan_rpm = fan.speed
+        return dict(gpu=busy, gpu_temp=temp, vram=used / total * 100 if used is not None and total else None,
+                    vram_used=used, vram_total=total, gpu_name=self.name, gpu_driver=self.driver,
+                    gpu_fan_rpm=fan_rpm, gpu_fan_percent=fan_percent)
+
+
+class Sampler:
+    def __init__(self):
+        self.previous_cpu = cpu_counters()
+        self.previous_network = network_counters()
+        self.previous_processes = process_counters()
+        self.previous_time = time.monotonic()
+        self.gpu = GpuMetrics()
+        self.history = {key: deque(maxlen=SAMPLES) for key in ('cpu', 'temperature', 'memory', 'rx', 'tx', 'gpu', 'gpu_temp', 'vram')}
+        self.core_history = {}
+        self.timestamps = deque(maxlen=SAMPLES)
+        self.disks, self.disk_time = [], 0
+        self.data = None
+
+    def sample(self):
+        stamp = time.monotonic()
+        elapsed = max(.001, stamp - self.previous_time)
+        cpu = cpu_counters()
+        usage = {}
+        for key, (total, idle) in cpu.items():
+            old_total, old_idle = self.previous_cpu.get(key, (total, idle))
+            delta = total - old_total
+            usage[key] = max(0, min(100, 100 * (1 - (idle - old_idle) / delta))) if delta > 0 else 0
+        memory = {}
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            key, value = line.split(':', 1)
+            memory[key] = int(value.split()[0]) * 1024
+        used = memory['MemTotal'] - memory['MemAvailable']
+        interface, rx, tx = network_counters()
+        old_interface, old_rx, old_tx = self.previous_network
+        rx_rate = max(0, rx - old_rx) / elapsed if interface and interface == old_interface else 0
+        tx_rate = max(0, tx - old_tx) / elapsed if interface and interface == old_interface else 0
+        if interface != old_interface:
+            self.history['rx'].clear()
+            self.history['tx'].clear()
+        processes = process_counters()
+        hz = os.sysconf('SC_CLK_TCK')
+        for identity, process in processes.items():
+            old = self.previous_processes.get(identity)
+            process['cpu'] = max(0, process['ticks'] - old['ticks']) / hz / elapsed * 100 if old else 0
+        disk = shutil.disk_usage('/')
+        if stamp - self.disk_time >= 10:
+            self.disks, self.disk_time = mounted_disks(), stamp
+        self.data = dict(cpu=usage['cpu'], cores=[v for k, v in usage.items() if k != 'cpu'],
+            memory_used=used, memory_total=memory['MemTotal'],
+            memory=used / memory['MemTotal'] * 100,
+            swap_used=memory['SwapTotal'] - memory['SwapFree'], swap_total=memory['SwapTotal'],
+            interface=interface, rx=rx_rate, tx=tx_rate, rx_total=rx, tx_total=tx,
+            uptime=float(Path('/proc/uptime').read_text().split()[0]),
+            load=os.getloadavg(), disk_free=disk.free, disk_total=disk.total,
+            temperature=cpu_temperature(), processes=list(processes.values()), disks=self.disks)
+        self.data.update(self.gpu.sample())
+        self.data.update(cpu_fan_metrics())
+        for key, value in usage.items():
+            if key != 'cpu':
+                self.core_history.setdefault(key, deque(maxlen=SAMPLES)).append(value)
+        for key, history in self.history.items():
+            history.append(self.data[key])
+        self.timestamps.append(stamp)
+        self.previous_cpu, self.previous_network = cpu, (interface, rx, tx)
+        self.previous_processes, self.previous_time = processes, stamp
+        return self.data
+
+
+class SystemDesktop:
+    def __init__(self):
+        self.step = INTERVAL
+        try:
+            saved = json.loads((CACHE / 'settings.json').read_text()).get('step')
+            if saved in REFRESH_STEPS:
+                self.step = saved
+        except (OSError, ValueError):
+            pass
+        self.sample_timer = None
+        self.sampler = Sampler()
+        self.root = tk.Tk(className='SystemDesktop')
+        self.root.withdraw()
+        self.root.overrideredirect(True)
+        self.root.title('ASCII System Desktop')
+        self.root.configure(background='#000000')
+        self.root.wm_attributes('-type', 'desktop')
+        self.canvas = StableCanvas(self.root, bg='#000000', highlightthickness=0, takefocus=0)
+        self.canvas.pack(fill='both', expand=True)
+        self.cpu_threads = False
+        self.fan_state = {}
+        self.fan_error = None
+        self.drag_fan = None
+        self.drag_pending = None
+        self.drag_timer = None
+        try:
+            self.cpu_threads = json.loads((CACHE / 'view.json').read_text()).get('cpu_threads', False)
+        except (OSError, ValueError):
+            pass
+        self.canvas.bind('<Button-4>', self.change_step)
+        self.canvas.bind('<Button-5>', self.change_step)
+        self.canvas.bind('<MouseWheel>', self.change_step)
+        self.canvas.bind('<Button-1>', self.pointer_press)
+        self.canvas.bind('<B1-Motion>', self.pointer_drag)
+        self.canvas.bind('<ButtonRelease-1>', self.pointer_release)
+        self.canvas.bind('<Motion>', lambda _: self.canvas.configure(cursor='hand2'))
+        self.canvas.bind('<Leave>', lambda _: self.canvas.configure(cursor=''))
+        self.root.bind('<Configure>', self.configure)
+        self.geometry = None
+        self.place()
+        self.root.deiconify()
+        self.root.update_idletasks()
+        self.click_through()
+        self.root.lower()
+        self.sample_timer = self.root.after(round(self.step * 1000), self.tick)
+
+        self.heartbeat()
+        self.clock_tick()
+
+    def change_step(self, event):
+        scale, ox, oy = self.transform()
+        x, y = (event.x - ox) / scale, (event.y - oy) / scale
+        if not (1510 <= x <= 1820 and 990 <= y <= 1030):
+            return
+        direction = -1 if event.num == 4 or getattr(event, 'delta', 0) > 0 else 1
+        index = max(0, min(len(REFRESH_STEPS) - 1, REFRESH_STEPS.index(self.step) + direction))
+        step = REFRESH_STEPS[index]
+        if step == self.step:
+            return 'break'
+        self.step = step
+        (CACHE / 'settings.json').write_text(json.dumps({'step': self.step}))
+        if self.sample_timer is not None:
+            self.root.after_cancel(self.sample_timer)
+        self.sample_timer = self.root.after(round(self.step * 1000), self.tick)
+        self.draw()
+        return 'break'
+
+    def click_through(self):
+        class Rectangle(ctypes.Structure):
+            _fields_ = [('x', ctypes.c_short), ('y', ctypes.c_short),
+                        ('width', ctypes.c_ushort), ('height', ctypes.c_ushort)]
+        x11 = ctypes.CDLL('libX11.so.6')
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        if not getattr(self, 'xdisplay', None):
+            self.xdisplay = x11.XOpenDisplay(None)
+        shape = ctypes.CDLL('libXext.so.6')
+        shape.XShapeCombineRectangles.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        frame = int(self.root.tk.call('wm', 'frame', self.root._w), 0)
+        scale, ox, oy = self.transform()
+        rectangles = [(20, 140, 580, 230), (486, 8, 368, 92), (986, 8, 368, 92), (1510, 990, 310, 40)]
+        regions = (Rectangle * len(rectangles))(*(Rectangle(
+            round(ox + x * scale), round(oy + y * scale),
+            max(1, round(w * scale)), max(1, round(h * scale))) for x, y, w, h in rectangles))
+        shape.XShapeCombineRectangles(self.xdisplay, frame, 2, 0, 0, ctypes.byref(regions), len(regions), 0, 0)
+        x11.XFlush(self.xdisplay)
+        self.move_surface()
+
+    def move_surface(self):
+        # Tk's Xinerama placement can clamp vertical offsets after a driver
+        # change. Position the unmanaged X surface in root coordinates.
+        if not getattr(self, 'xdisplay', None) or not getattr(self, 'output_rect', None):
+            return
+        lib = ctypes.CDLL('libX11.so.6')
+        lib.XMoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
+        lib.XSetWindowBackground.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
+        lib.XClearWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        lib.XGetGeometry.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+        lib.XFlush.argtypes = [ctypes.c_void_p]
+        frame = int(self.root.tk.call('wm', 'frame', self.root._w), 0)
+
+        def position(window):
+            root, x, y = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int()
+            width, height, border, depth = (ctypes.c_uint() for _ in range(4))
+            lib.XGetGeometry(self.xdisplay, window, ctypes.byref(root), ctypes.byref(x), ctypes.byref(y),
+                ctypes.byref(width), ctypes.byref(height), ctypes.byref(border), ctypes.byref(depth))
+            return x.value, y.value
+
+        target = self.output_rect['x'], self.output_rect['y']
+        lib.XSetWindowBackground(self.xdisplay, frame, 0)
+        moved = False
+        if position(frame) != target:
+            lib.XMoveWindow(self.xdisplay, frame, *target)
+            moved = True
+        if position(self.root.winfo_id()) != (0, 0):
+            lib.XMoveWindow(self.xdisplay, self.root.winfo_id(), 0, 0)
+            moved = True
+        if moved:
+            lib.XClearWindow(self.xdisplay, frame)
+        lib.XFlush(self.xdisplay)
+
+    def transform(self):
+        w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
+        scale = min(w / 1920, h / 1080)
+        return scale, (w - 1840 * scale) / 2, (h - 1000 * scale) / 2 - 10 * scale
+
+    def configure(self, _):
+        size = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if size == getattr(self, '_configured_size', None):
+            return
+        self._configured_size = size
+        self.draw()
+        if getattr(self, 'xdisplay', None):
+            self.click_through()
+
+    def toggle_cpu(self, event):
+        scale, ox, oy = self.transform()
+        x, y = (event.x - ox) / scale, (event.y - oy) / scale
+        if 20 <= x <= 600 and 140 <= y <= 370:
+            self.cpu_threads = not self.cpu_threads
+            (CACHE / 'view.json').write_text(json.dumps({'cpu_threads': self.cpu_threads}))
+            self.draw()
+
+    def control_fan(self, request):
+        try:
+            self.fan_state = fan_request(request)
+            self.fan_error = None
+        except (OSError, ValueError) as error:
+            self.fan_error = str(error)
+        self.draw()
+
+    def pointer_press(self, event):
+        scale, ox, oy = self.transform()
+        x, y = (event.x - ox) / scale, (event.y - oy) / scale
+        for device, origin in (('cpu', 486), ('gpu', 986)):
+            if origin <= x <= origin + 368:
+                if 35 <= y <= 70:
+                    self.drag_fan = (device, origin)
+                    self.pointer_drag(event)
+                    return
+                if 73 <= y <= 99:
+                    for label, left, right in (('auto', 0, 76), ('full', 85, 161), ('silent', 170, 256)):
+                        if origin + left <= x <= origin + right:
+                            self.control_fan(dict(op='set', device=device, mode=label))
+                            return
+        self.toggle_cpu(event)
+
+    def pointer_drag(self, event):
+        if not self.drag_fan:
+            return
+        device, origin = self.drag_fan
+        scale, ox, _ = self.transform()
+        x = (event.x - ox) / scale
+        percent = round(max(0, min(100, (x - origin - 12) / 344 * 100)))
+        minimum = self.fan_state.get(device, {}).get('minimum', 35 if device == 'cpu' else 30)
+        self.drag_pending = dict(op='set', device=device, mode='manual', percent=max(minimum, percent))
+        if self.drag_timer is None:
+            self.drag_timer = self.root.after(120, self.flush_drag)
+
+    def flush_drag(self):
+        self.drag_timer = None
+        if self.drag_pending:
+            request, self.drag_pending = self.drag_pending, None
+            self.control_fan(request)
+
+    def pointer_release(self, event):
+        if self.drag_fan:
+            self.pointer_drag(event)
+            if self.drag_timer is not None:
+                self.root.after_cancel(self.drag_timer)
+                self.drag_timer = None
+            self.flush_drag()
+            self.drag_fan = None
+
+    def place(self):
+        try:
+            outputs = json.loads(subprocess.check_output(['i3-msg', '-t', 'get_outputs'], timeout=3))
+            active = [output for output in outputs if output['active']]
+            if active:
+                rect = min(active, key=lambda output: output['rect']['x'])['rect']
+                self.output_rect = rect
+                geometry = f"{rect['width']}x{rect['height']}+{rect['x']}+{rect['y']}"
+                if geometry != self.geometry:
+                    self.root.geometry(geometry)
+                    self.geometry = geometry
+                    self.root.lower()
+                self.move_surface()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            logging.exception('Cannot query monitor layout')
+        self.root.after(10000, self.place)
+
+    def clock_tick(self):
+        item = getattr(self, 'clock_item', None)
+        if item:
+            value = datetime.now().strftime('%H:%M:%S')
+            self.canvas.itemconfigure(item, text=value)
+            for record in self.canvas._pool.get('text', []):
+                if record['item'] == item:
+                    record['options']['text'] = value
+                    break
+        self.root.after(1000 - int(time.time() * 1000) % 1000, self.clock_tick)
+
+    def heartbeat(self):
+        try:
+            self.fan_state = fan_request(dict(op='heartbeat'))
+            self.fan_error = None
+        except (OSError, ValueError) as error:
+            self.fan_error = str(error)
+        self.root.after(2000, self.heartbeat)
+
+    def tick(self):
+        self.sample_timer = None
+        try:
+            self.sampler.sample()
+            self.draw()
+        except (OSError, ValueError, KeyError):
+            logging.exception('Cannot sample system metrics')
+        self.sample_timer = self.root.after(round(self.step * 1000), self.tick)
+
+    def draw(self):
+        self.canvas.begin_frame()
+        try:
+            self.render()
+        finally:
+            self.canvas.end_frame()
+
+    def render(self):
+        c = self.canvas
+        scale, ox, oy = self.transform()
+        if scale < .1:
+            return
+
+        def text(x, y, value, size=16, color=WHITE, anchor='nw', bold=False):
+            return c.create_text(ox + x * scale, oy + y * scale, text=value,
+                fill=color, anchor=anchor,
+                font=('Noto Sans Mono', -max(8, int(size * scale)), 'bold' if bold else 'normal'))
+
+        def divider(y):
+            text(20, y, '+' + '-' * 164 + '+', 18, BORDER)
+
+        def chart(x, y, history, maximum, color, shade, percent=True,
+                  width=510, height=96, compact=False, unit='%', temperature=None, layer=False):
+            values = list(history)
+            # Missing telemetry is a gap, never a fabricated zero.
+            start = max((i + 1 for i, value in enumerate(values) if value is None), default=0)
+            stamps = list(self.sampler.timestamps)[-len(values):] if values else []
+            latest = self.sampler.timestamps[-1] if self.sampler.timestamps else 0
+            start = max(start, next((i for i, stamp in enumerate(stamps) if stamp >= latest - 180), len(stamps)))
+            values, stamps = values[start:], stamps[start:]
+            steps = 8
+            interpolated = smooth_samples(values, steps)
+            points = []
+            for i, value in enumerate(interpolated):
+                segment = min(i // steps, len(stamps) - 1)
+                stamp = stamps[segment]
+                if segment + 1 < len(stamps):
+                    stamp += (stamps[segment + 1] - stamp) * (i % steps) / steps
+                px = x + (1 - (latest - stamp) / 180) * width
+                py = y + height * (1 - max(0, min(1, value / maximum)))
+                points.extend((ox + px * scale, oy + py * scale))
+            baseline = oy + (y + height) * scale
+            if len(points) >= 4 and not layer:
+                c.create_polygon(points[0], baseline, *points, points[-2], baseline,
+                    fill=shade, outline='')
+            for fraction in (() if layer else (0, .5, 1)):
+                gy = oy + (y + fraction * height) * scale
+                c.create_line(ox + x * scale, gy, ox + (x + width) * scale, gy,
+                    fill=BORDER, dash=(2, 6), width=1)
+            if len(points) >= 4:
+                c.create_line(*points, fill=color, width=max(1, 1.6 * scale),
+                    capstyle='round', joinstyle='round')
+            if points:
+                px, py = points[-2:]
+                r = 2 * scale
+                c.create_oval(px - r, py - r, px + r, py + r, fill=color, outline='')
+            if temperature is not None:
+                chart(x, y, temperature, 100, PURPLE, None,
+                      width=width, height=height, compact=True, layer=True)
+                if not compact:
+                    for fraction, label in ((0, '100°C'), (.5, '50°C'), (1, '0°C')):
+                        text(x + width + 6, y + height * fraction, label, 10, PURPLE)
+            if not compact:
+                text(x - 8, y, f'{maximum:g}{unit}' if percent else byte_size(maximum) + '/s', 10, MUTED, 'ne')
+                text(x - 8, y + height / 2, f'{maximum / 2:g}{unit}' if percent else byte_size(maximum / 2) + '/s', 10, MUTED, 'e')
+                text(x - 8, y + height, '0', 10, MUTED, 'ne')
+                text(x, y + height + 16, '-3 min', 11, MUTED)
+                text(x + width / 3, y + height + 16, '-2 min', 11, MUTED, 'n')
+                text(x + width * 2 / 3, y + height + 16, '-1 min', 11, MUTED, 'n')
+                text(x + width, y + height + 16, 'now', 11, MUTED, 'ne')
+
+        def thermal_legend(x, cpu=False):
+            text(x, 348, '── load, %', 11, GOLD)
+            text(x + 165, 348, '── temperature' + (' CPU' if cpu else '') + ', °C', 11, PURPLE)
+
+        def fan_bar(x, label, rpm, percent, pwm=False):
+            text(x + 4, 15, label + ' FAN', 15, CYAN)
+            segments = 32
+            filled = round(max(0, min(100, percent)) / 100 * segments) if percent is not None else 0
+            text(x, 44, '[' + '.' * segments + ']', 18, BORDER)
+            if percent is not None:
+                text(x, 44, '[' + '#' * filled, 18, CYAN)
+            status = f'{rpm:.0f} RPM' if rpm is not None else 'no sensor'
+            if percent is not None:
+                status += f" · {percent:.0f}%" + (' PWM' if pwm else '')
+            text(x + 368, 15, status, 15, WHITE, 'ne')
+            state = self.fan_state.get(label.lower(), {})
+            mode = state.get('mode')
+            for name, offset in (('AUTO', 0), ('FULL', 85), ('SILENT', 170)):
+                active = mode == name.lower() and not self.fan_error
+                text(x + offset, 80, '[' + name + ']', 12,
+                     CYAN if active else MUTED, bold=active)
+            if self.fan_error:
+                detail = 'OFFLINE'
+            elif state.get('override'):
+                detail = 'COOLING 100%'
+            elif mode == 'manual':
+                detail = f"MANUAL {state.get('target', 0)}%"
+            elif state.get('error'):
+                detail = 'AUTO !'
+            else:
+                detail = ''
+            text(x + 368, 81, detail, 10, GOLD if state.get('override') else MUTED, 'ne')
+
+        text(20, 15, 'S Y S T E M', 34, CYAN, bold=True)
+        self.clock_item = text(1810, 20, datetime.now().strftime('%H:%M:%S'), 30, WHITE, 'ne')
+        text(22, 69, socket.gethostname() + ' / LINUX / LIVE', 14, MUTED)
+        divider(107)
+        d = self.sampler.data
+        if d is None:
+            text(920, 450, 'Collecting first sample...', 22, MUTED, 'center')
+            return
+        fan_bar(486, 'CPU', d['cpu_fan_rpm'], d['cpu_fan_percent'], pwm=True)
+        fan_bar(986, 'GPU', d['gpu_fan_rpm'], d['gpu_fan_percent'])
+        uptime = int(d['uptime'])
+        text(1810, 70, f"UP {uptime // 86400}d {uptime // 3600 % 24:02}:{uptime // 60 % 60:02}"
+             + f"   LOAD {' / '.join(f'{v:.2f}' for v in d['load'])}", 14, MUTED, 'ne')
+        history = self.sampler.history
+        text(25, 155, '[ CPU ]', 16, CYAN)
+        temp = f"  {d['temperature']:.0f}°C" if d['temperature'] is not None else ''
+        text(580, 148, f"{d['cpu']:.1f}%{temp}", 25, GOLD, 'ne')
+        if self.cpu_threads:
+            cores = list(self.sampler.core_history.items())
+            columns = 3
+            rows = math.ceil(len(cores) / columns)
+            cell_height = 132 / max(1, rows)
+            for index, (name, samples) in enumerate(cores):
+                x = 65 + index % columns * 177
+                y = 205 + index // columns * cell_height
+                text(x, y, f"CPU {name[3:]}   {samples[-1]:.0f}%", 11, GOLD)
+                chart(x, y + 21, samples, 100, GOLD, '#3c3020',
+                      width=154, height=max(12, cell_height - 33), compact=True,
+                      temperature=history['temperature'])
+        else:
+            chart(70, 210, history['cpu'], 100, GOLD, '#3c3020', width=480,
+                  temperature=history['temperature'])
+        thermal_legend(70, cpu=self.cpu_threads)
+        text(25, 374, 'CLICK GRAPH: ' + ('total load' if self.cpu_threads else 'per-thread graphs'), 11, MUTED)
+        text(25, 395, '[ RAM ]', 17, CYAN)
+        text(580, 387, f"{d['memory']:.1f}%", 30, CYAN, 'ne')
+        chart(70, 450, history['memory'], 100, CYAN, '#183b34')
+        text(25, 587, f"RAM {byte_size(d['memory_used'])} / {byte_size(d['memory_total'])}"
+             + f"   SWAP {byte_size(d['swap_used'])}", 12, MUTED)
+        for key, label, color, shade, header, graph in (
+                ('rx', 'DOWNLOAD', BLUE, '#1c2b44', 155, 210),
+                ('tx', 'UPLOAD', CYAN, '#183b34', 395, 450)):
+            text(635, header, f'[ {label} ]', 16, CYAN)
+            text(1190, header - 7, byte_size(d[key]) + '/s', 25, color, 'ne')
+            maximum = max(1024, 2 ** math.ceil(math.log2(max(1, max(history[key])) * 1.1)))
+            chart(680, graph, history[key], maximum, color, shade, False)
+            interface = d['interface'] or 'disconnected'
+            text(635, graph + 140, f"{interface}   TOTAL {byte_size(d[key + '_total'])}"
+                 + f"   PEAK {byte_size(max(history[key]))}/s", 12, MUTED)
+        gpu_load = d['gpu'] is not None
+        gpu_key = 'gpu' if gpu_load else 'gpu_temp'
+        text(1245, 155, '[ GPU ]', 16, CYAN)
+        gpu_value = d[gpu_key]
+        gpu_stat = f'{gpu_value:.0f}' + ('%' if gpu_load else '°C') if gpu_value is not None else '--'
+        if gpu_load and d['gpu_temp'] is not None:
+            gpu_stat += f"  {d['gpu_temp']:.0f}°C"
+        text(1800, 148, gpu_stat, 25, GOLD, 'ne')
+        chart(1290, 210, history[gpu_key], 100, GOLD, '#3c3020',
+              unit='%' if gpu_load else '°C', width=480,
+              temperature=history['gpu_temp'] if gpu_load else None)
+        thermal_legend(1290)
+        text(1245, 374, d['gpu_name'] + (' · load unavailable' if not gpu_load else ''), 11, MUTED)
+        text(1245, 395, '[ VRAM ]', 16, CYAN)
+        text(1800, 387, f"{d['vram']:.1f}%" if d['vram'] is not None else '--', 30, BLUE, 'ne')
+        chart(1290, 450, history['vram'], 100, BLUE, '#1c2b44')
+        if d['vram'] is None:
+            text(1545, 488, 'Driver does not report VRAM usage', 13, MUTED, 'n')
+        capacity = byte_size(d['vram_total']) if d['vram_total'] else '--'
+        used = byte_size(d['vram_used']) if d['vram_used'] is not None else '--'
+        text(1245, 587, f"VRAM {used} / {capacity}   {d['gpu_driver']}", 12, MUTED)
+        divider(625)
+        processes = d['processes']
+        for x, key, title, color in ((25, 'cpu', 'BY CPU', GOLD), (635, 'rss', 'BY MEMORY', CYAN)):
+            text(x, 665, f'[ PROCESSES / {title} ]', 16, CYAN)
+            text(x, 706, f"{'PID':>6}  {'PROCESS':<22} {'CPU %':>7} {'RAM':>11} ST", 14, MUTED)
+            for row, process in enumerate(sorted(processes, key=lambda p: (p[key], p['rss']), reverse=True)[:8]):
+                name = ''.join(ch if ch.isprintable() else '?' for ch in process['name'])[:22]
+                value = f"{process['pid']:>6}  {name:<22} {process['cpu']:>7.1f} {byte_size(process['rss']):>11}  {process['state']}"
+                text(x, 742 + row * 23, value, 14, color if row == 0 else WHITE)
+        text(1245, 665, '[ DISKS ]', 16, CYAN)
+        disks = d['disks']
+        if not disks:
+            text(1525, 795, 'No mounted disks', 14, MUTED, 'center')
+        columns = min(2, max(1, len(disks)))
+        rows = math.ceil(len(disks) / columns)
+        cell_height = min(140, 280 / max(1, rows))
+        for index, disk in enumerate(disks):
+            cx = 1240 + (index % columns + .5) * 580 / columns
+            cy = 752 + index // columns * cell_height
+            color = '#f7768e' if disk['percent'] >= 90 else GOLD if disk['percent'] >= 80 else CYAN
+            radius = min(50, cell_height * .36)
+            box = (ox + (cx - radius) * scale, oy + (cy - radius) * scale,
+                   ox + (cx + radius) * scale, oy + (cy + radius) * scale)
+            c.create_oval(*box, outline='#203a34', width=8 * scale)
+            c.create_arc(*box, start=90, extent=-disk['percent'] * 3.6,
+                         style='arc', outline=color, width=8 * scale)
+            text(cx, cy - 10, f"{disk['percent']:.0f}%", 26, color, 'center', True)
+            label = Path(disk['target']).name or 'root'
+            text(cx, cy + 16, label, 12, WHITE, 'center')
+            fraction = disk['percent'] / 100
+            for occupied, angle, amount in (
+                    (True, math.pi * fraction, disk['used']),
+                    (False, math.pi * (1 + fraction), disk['free'])):
+                side = 1 if occupied else -1
+                ink = color if occupied else '#6b9e90'
+                # Start at the middle of the corresponding arc, then take
+                # the leader radially outward before turning toward the label.
+                sx = cx + radius * math.sin(angle)
+                sy = cy - radius * math.cos(angle)
+                ex = cx + (radius + 10) * math.sin(angle)
+                ey = cy - (radius + 10) * math.cos(angle)
+                lx = cx + side * 68
+                c.create_line(ox + sx * scale, oy + sy * scale,
+                    ox + ex * scale, oy + ey * scale,
+                    ox + lx * scale, oy + ey * scale,
+                    fill=ink, width=max(1, scale), joinstyle='round')
+                r = 2 * scale
+                px, py = ox + sx * scale, oy + sy * scale
+                c.create_oval(px - r, py - r, px + r, py + r, fill=ink, outline='')
+                anchor = 'w' if occupied else 'e'
+                label_x = cx + side * 75
+                text(label_x, ey, f'{amount / 1e9:.1f} GB', 11, WHITE, anchor)
+        divider(973)
+        text(25, 1000, f"{len(processes)} processes · process CPU: 100% = 1 core"
+             + f" · history {min(180, int(self.sampler.timestamps[-1] - self.sampler.timestamps[0]))} s", 13, MUTED)
+        text(1810, 1000, f"step {self.step:g} s · ↕ wheel", 13, CYAN, 'ne')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--sample', action='store_true', help='Print one measured snapshot without opening a window')
+    args = parser.parse_args()
+    if args.sample:
+        sampler = Sampler()
+        time.sleep(INTERVAL)
+        print(json.dumps(sampler.sample(), ensure_ascii=False))
+        return
+    CACHE.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=CACHE / 'system.log', level=logging.WARNING)
+    with (CACHE / 'widget.lock').open('w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        desktop = SystemDesktop()
+        desktop.root.mainloop()
+
+
+if __name__ == '__main__':
+    main()
